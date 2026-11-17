@@ -1,4 +1,5 @@
 mod api;
+mod ca;
 mod config;
 // macOS: only the entropy is used (see macos.rs); the rest is kept for its tests
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -7,6 +8,9 @@ mod game;
 mod i18n;
 #[cfg(target_os = "macos")]
 mod macos;
+// macOS: the game may not reach private addresses, so it is pointed at loopback and relayed from there
+#[cfg(target_os = "macos")]
+mod relay;
 // macOS: no external memory patch (see macos.rs); kept for its tests
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod patcher;
@@ -52,6 +56,24 @@ struct GameEvent {
 
 fn emit(app: &AppHandle, kind: &'static str, message: impl Into<String>) {
     let _ = app.emit("game", GameEvent { kind, message: message.into() });
+}
+
+/// One line in launcher.log (same folder as settings.json): what was written where and how the start went,
+/// so a wrong portal or a missing macOS permission can be read without a terminal.
+fn log_line(message: impl AsRef<str>) {
+    use std::io::Write;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let stamp = format!("{:02}:{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
+    let path = config::config_dir().join("launcher.log");
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{stamp} {}", message.as_ref());
+    }
 }
 
 fn runners() -> Vec<(String, String)> {
@@ -107,6 +129,7 @@ fn detect_locale(game_dir: String) -> Option<String> {
 #[tauri::command]
 async fn login(state: State<'_, AppState>, email: String, password: String) -> Result<String, String> {
     let server = state.settings.lock().unwrap().server.clone();
+    ca::refresh(&server).await;
     let api = api::Api::new(&server).await?;
     let ticket = api.login(email.trim(), &password).await?;
     let token = api.remember(&ticket).await?;
@@ -138,7 +161,8 @@ struct Status {
 #[tauri::command]
 async fn server_status(state: State<'_, AppState>) -> Result<Status, String> {
     let s = state.settings.lock().unwrap().server.clone();
-    let (world, bnet) = tokio::join!(api::port_open(&s.address, s.world_port), api::port_open(&s.address, s.bnet_port));
+    // the login port is probed over TLS: a bare TCP connect makes the server log an aborted handshake every poll
+    let (world, bnet) = tokio::join!(api::port_open(&s.address, s.world_port), api::login_open(&s));
     Ok(Status { online: world, login: bnet })
 }
 
@@ -154,12 +178,14 @@ async fn news(state: State<'_, AppState>) -> Result<Vec<api::NewsItem>, String> 
 #[tauri::command]
 async fn checks(state: State<'_, AppState>) -> Result<system::Checks, String> {
     let settings = state.settings.lock().unwrap().clone();
+    ca::refresh(&settings.server).await;
     tokio::task::spawn_blocking(move || system::check(&settings)).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn repair(state: State<'_, AppState>) -> Result<system::Checks, String> {
     let settings = state.settings.lock().unwrap().clone();
+    ca::refresh(&settings.server).await;
     tokio::task::spawn_blocking(move || {
         system::repair(&settings)?;
         Ok(system::check(&settings))
@@ -187,6 +213,8 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     }
     let session = Session::load().ok_or(t("login_first"))?;
     emit(app, "step", t("step_connecting"));
+    // the server may have regenerated its certificates since this launcher was built
+    ca::refresh(&settings.server).await;
     let api = api::Api::new(&settings.server).await?;
     let login = match api.launcher_login(&session.token).await {
         Err(e) if e == "expired" => {
@@ -198,20 +226,37 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
 
     emit(app, "step", t("step_preparing"));
     let s = settings.clone();
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        game::write_wtf(&s)?;
-        #[cfg(target_os = "linux")]
-        system::install_ca_in_prefix(&s)?;
-        let account = login.game_accounts.first().map(|a| a.name.clone()).unwrap_or_else(|| "WoW1".into());
+    let renewed = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        // the game account the login answer names: "WoW1" only when the server does not list one
+        let account = login
+            .game_accounts
+            .first()
+            .map(|a| a.name.clone())
+            .unwrap_or_else(|| "WoW1".into());
+        // macOS blocks the game's connections to the server's private address (Local Network privacy, no packet
+        // leaves the machine); loopback is always allowed, so the client connects there and the launcher relays
+        #[cfg(target_os = "macos")]
+        let portal = format!("127.0.0.1:{}", s.server.bnet_port);
+        #[cfg(not(target_os = "macos"))]
         let portal = format!("{}:{}", s.server.portal, s.server.bnet_port);
+        log_line(format!("play: portal {portal}, game account {account}, ticket {} characters", login.login_ticket.len()));
+        game::write_wtf(&s)?;
+        log_line("wtf: portal set in Config.wtf and ForeverLauncher.wtf");
+        // the game client only gets through if this computer trusts the CA the server uses right now
+        let renewed = system::ensure_ca(&s)?;
+        log_line(if renewed { "ca: trust renewed" } else { "ca: already trusted" });
         #[cfg(not(target_os = "macos"))]
         game::write_launch_options(&s, &portal, &login.login_ticket, &account)?;
         #[cfg(target_os = "macos")]
         macos::write_launch_options(&portal, &login.login_ticket, &account)?;
-        Ok(())
+        log_line("launch options: written and read back");
+        Ok(renewed)
     })
     .await
     .map_err(|e| e.to_string())??;
+    if renewed {
+        emit(app, "log", t("cert_renewed"));
+    }
     launch(app, settings).await
 }
 
@@ -222,15 +267,26 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
     let copy = tokio::task::spawn_blocking(move || macos::prepare_copy(&s, |m| emit(&a, "step", m)))
         .await
         .map_err(|e| e.to_string())??;
+    // the login and the world port are relayed from 127.0.0.1, so the game never talks to the private address
+    let relay = relay::Relay::start(&settings.server.address, &[settings.server.bnet_port, settings.server.world_port])?;
+    log_line(format!(
+        "relay: {:?} -> {}",
+        relay.ports(),
+        settings.server.address
+    ));
     emit(app, "step", t("step_launching"));
+    log_line(format!("start: {}", copy.display()));
     let (child, log) = macos::spawn(&settings, &copy)?;
     let app = app.clone();
     std::thread::spawn(move || {
+        // the relay has to live as long as the game: dropped when this thread ends, i.e. when the game closed
         emit(&app, "running", t("running"));
         match macos::watch(child, &log, |kind, m| emit(&app, kind, m)) {
             Ok(()) => emit(&app, "closed", t("closed")),
             Err(e) => emit(&app, "error", e),
         }
+        drop(relay);
+        log_line("relay: stopped");
         app.state::<AppState>().playing.store(false, Ordering::SeqCst);
     });
     Ok(())

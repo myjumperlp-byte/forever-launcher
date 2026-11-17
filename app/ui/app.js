@@ -149,7 +149,17 @@ $('signup-link').addEventListener('click', (ev) => {
 });
 
 // ------------------------------------------------------------------------------------------------ play
+// One click, one attempt. Without the guard a second click while the start is running fires another play
+// command, and the error the backstop then returns clears state.playing although the first start is still going.
+let playInFlight = false;
+let lastPlayAt = 0;
+
 $('play').addEventListener('click', async () => {
+  const now = Date.now();
+  // running attempt, or the same physical press delivered twice: do nothing
+  if (playInFlight || now - lastPlayAt < 300) return;
+  playInFlight = true;
+  lastPlayAt = now;
   $('log').textContent = '';
   state.playing = true;
   updatePlayButton();
@@ -162,6 +172,8 @@ $('play').addEventListener('click', async () => {
     setStep(String(e), 'err');
     log(t('error', { e }));
     refresh();   // an expired session sends back to the login view
+  } finally {
+    playInFlight = false;
   }
 });
 

@@ -1,10 +1,9 @@
 //! PC preparation: hosts entry for the portal, trust in the server CA, and (Linux) the Wine/Proton runner.
 
-use crate::config::{Server, Settings, CA_PEM};
+use crate::ca;
+use crate::config::{Server, Settings};
 use crate::i18n::{t, tf};
-use base64::Engine;
 use serde::Serialize;
-use sha1::{Digest, Sha1};
 use std::net::{IpAddr, ToSocketAddrs};
 
 #[derive(Serialize)]
@@ -14,18 +13,6 @@ pub struct Checks {
     pub hosts_detail: String,
     pub certificate: bool,
     pub certificate_detail: String,
-}
-
-/// DER bytes of the embedded CA certificate.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-pub fn ca_der() -> Vec<u8> {
-    let b64: String = CA_PEM.lines().filter(|l| !l.starts_with("-----")).collect();
-    base64::engine::general_purpose::STANDARD.decode(b64).expect("embedded CA is valid PEM")
-}
-
-#[cfg_attr(target_os = "macos", allow(dead_code))]
-pub fn ca_sha1() -> [u8; 20] {
-    Sha1::digest(ca_der()).into()
 }
 
 /// IPv4 address the server address resolves to (it may be a DNS name).
@@ -79,7 +66,7 @@ mod imp {
             let Ok(store) = CertOpenSystemStoreW(None, w!("ROOT")) else {
                 return (false, t("cert_store_unreadable").into());
             };
-            let hash = ca_sha1();
+            let hash = ca::sha1();
             let blob = CRYPT_INTEGER_BLOB { cbData: 20, pbData: hash.as_ptr() as *mut u8 };
             let found = CertFindCertificateInStore(store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0,
                                                    CERT_FIND_SHA1_HASH, Some(&blob as *const _ as _), None);
@@ -149,7 +136,7 @@ mod imp {
         }
         // CA in the machine root store
         unsafe {
-            let der = ca_der();
+            let der = ca::der();
             match CertOpenStore(CERT_STORE_PROV_SYSTEM_W, CERT_QUERY_ENCODING_TYPE(0), None,
                                 CERT_OPEN_STORE_FLAGS(CERT_SYSTEM_STORE_LOCAL_MACHINE_ID << CERT_SYSTEM_STORE_LOCATION_SHIFT),
                                 Some(w!("ROOT").as_ptr() as _)) {
@@ -165,6 +152,15 @@ mod imp {
         }
         code
     }
+
+    /// Makes this PC trust the server's current CA (one UAC prompt). Ok(true): it had to be installed.
+    pub fn ensure_ca(settings: &Settings) -> Result<bool, String> {
+        if certificate_status(settings).0 {
+            return Ok(false);
+        }
+        repair(settings)?;
+        Ok(true)
+    }
 }
 
 // ------------------------------------------------------------------------------------------------- macOS
@@ -172,7 +168,7 @@ mod imp {
 mod imp {
     use super::*;
     use crate::config::config_dir;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     /// Rewrites /etc/hosts (run as root by osascript, arguments passed separately).
@@ -193,13 +189,107 @@ killall -HUP mDNSResponder || true
         Ok(path)
     }
 
+    /// The CA in use, written to disk (the process `security` reads it from there).
+    fn ca_file() -> Result<PathBuf, String> {
+        write_file("forever_root_ca.crt", &ca::pem())
+    }
+
+    /// Common name of the CA: the name the certificate is stored under in the keychain.
+    fn common_name(ca: &Path) -> Option<String> {
+        let out = Command::new("openssl")
+            .args(["x509", "-in"])
+            .arg(ca)
+            .args(["-noout", "-subject", "-nameopt", "RFC2253"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let name = text.split("CN=").nth(1)?.trim().trim_matches('"').to_string();
+        (!name.is_empty()).then_some(name)
+    }
+
+    /// Fingerprint of every certificate with that name in the keychain search list (upper case, no spaces).
+    fn installed_fingerprints(cn: &str) -> Vec<String> {
+        let Ok(out) = Command::new("security").args(["find-certificate", "-a", "-c", cn, "-Z"]).output() else {
+            return Vec::new();
+        };
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("SHA-1 hash:"))
+            .map(|h| h.trim().replace(' ', "").to_ascii_uppercase())
+            .collect()
+    }
+
+    /// This user's keychain: the trust that matters for the game, and no administrator rights needed.
+    fn login_keychain() -> String {
+        crate::config::home().join("Library/Keychains/login.keychain-db").to_string_lossy().into_owned()
+    }
+
+    /// Whether that certificate name has an explicit SSL trust setting. A certificate that is only
+    /// *present* in the keychain is not trusted — `security verify-cert` happily accepts it anyway, which is
+    /// why the game still refused the connection while this check was missing.
+    fn has_ssl_trust(cn: &str) -> bool {
+        let Ok(out) = Command::new("security").arg("dump-trust-settings").output() else { return false };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut ours = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(name) = line.strip_prefix("Cert ").and_then(|r| r.split_once(':').map(|(_, n)| n)) {
+                ours = name.trim() == cn;
+            } else if ours && line.contains("Policy OID") && line.contains("SSL") {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// (does this Mac trust the server's *current* CA?, text for the UI)
+    fn status() -> (bool, String) {
+        let Ok(ca) = ca_file() else { return (false, t("cert_not_trusted").into()) };
+        let current = ca::sha1_hex();
+        let Some(cn) = common_name(&ca) else { return (false, t("cert_not_trusted").into()) };
+        if !installed_fingerprints(&cn).contains(&current) {
+            // the server regenerated its certificates, or none was ever installed here
+            return (false, t("cert_not_installed").into());
+        }
+        if has_ssl_trust(&cn) {
+            (true, t("cert_ok_macos").into())
+        } else {
+            (false, t("cert_not_trusted").into())
+        }
+    }
+
     pub fn certificate_status(_: &Settings) -> (bool, String) {
-        // the client checks the certificate with the system trust settings (keychain)
-        let ok = write_file("forever_root_ca.crt", CA_PEM)
-            .ok()
-            .and_then(|ca| Command::new("security").args(["verify-cert", "-c"]).arg(ca).output().ok())
-            .is_some_and(|o| o.status.success());
-        (ok, if ok { t("cert_ok_macos").into() } else { t("cert_not_trusted").into() })
+        status()
+    }
+
+    /// Installs the certificate as a trusted root for SSL in this user's keychain (no dialog, no admin).
+    /// The system keychain would cover every user but needs the administrator authorisation, which macOS
+    /// refuses unless the launcher runs in the graphical session; the user's own trust is what the game uses.
+    fn install(ca: &Path) -> Result<(), String> {
+        let out = Command::new("security")
+            .args(["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k"])
+            .arg(login_keychain())
+            .arg(ca)
+            .output();
+        match out {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(tf("cert_trust_failed", &[&String::from_utf8_lossy(&o.stderr).trim()])),
+            Err(e) => Err(format!("security : {e}")),
+        }
+    }
+
+    /// Makes this Mac trust the server's current CA. Ok(true): it had to be installed (or renewed).
+    pub fn ensure_ca(_: &Settings) -> Result<bool, String> {
+        if status().0 {
+            return Ok(false);
+        }
+        install(&ca_file()?)?;
+        if status().0 {
+            Ok(true)
+        } else {
+            // just refusing the game with "cannot connect" would hide the reason
+            Err(t("cert_not_trusted").into())
+        }
     }
 
     pub fn repair(settings: &Settings) -> Result<(), String> {
@@ -227,14 +317,12 @@ killall -HUP mDNSResponder || true
                 Err(e) => errors.push(format!("osascript : {e}")),
             }
         }
-        if !certificate_status(settings).0 {
+        if !status().0 {
             // must run in the user's session (not as root): macOS asks for the authorisation itself, a root
             // process gets "no user interaction was possible"
-            let ca = write_file("forever_root_ca.crt", CA_PEM)?;
-            match Command::new("security").args(["add-trusted-cert", "-d", "-r", "trustRoot"]).arg(&ca).output() {
-                Ok(o) if o.status.success() => {}
-                Ok(o) => errors.push(tf("cert_trust_failed", &[&String::from_utf8_lossy(&o.stderr).trim()])),
-                Err(e) => errors.push(format!("security : {e}")),
+            match ca_file().and_then(|ca| install(&ca)) {
+                Ok(()) => {}
+                Err(e) => errors.push(e),
             }
         }
         if errors.is_empty() { Ok(()) } else { Err(errors.join(" ; ")) }
@@ -386,7 +474,7 @@ mod imp {
     }
 
     fn prefix_has_ca(prefix: &str) -> bool {
-        let sha = hex::encode_upper(ca_sha1());
+        let sha = ca::sha1_hex();
         ["system.reg", "pfx/system.reg"].iter().any(|r| {
             std::fs::read_to_string(Path::new(prefix).join(r)).map(|t| t.contains(&sha)).unwrap_or(false)
         })
@@ -408,8 +496,8 @@ mod imp {
         if prefix_has_ca(&settings.linux.prefix) {
             return Ok(());
         }
-        let der = ca_der();
-        let sha = ca_sha1();
+        let der = ca::der();
+        let sha = ca::sha1();
         let mut blob = Vec::with_capacity(der.len() + 40);
         for (prop, data) in [(3u32, &sha[..]), (0x20u32, &der[..])] {
             blob.extend(prop.to_le_bytes());
@@ -446,6 +534,19 @@ rm -f "$t""#;
             errors.push(e);
         }
         if errors.is_empty() { Ok(()) } else { Err(errors.join(" ; ")) }
+    }
+
+    /// Makes the game's Wine prefix trust the server's current CA. Ok(true): it had to be installed.
+    pub fn ensure_ca(settings: &Settings) -> Result<bool, String> {
+        if prefix_has_ca(&settings.linux.prefix) {
+            return Ok(false);
+        }
+        install_ca_in_prefix(settings)?;
+        if prefix_has_ca(&settings.linux.prefix) {
+            Ok(true)
+        } else {
+            Err(t("cert_not_in_prefix").into())
+        }
     }
 }
 

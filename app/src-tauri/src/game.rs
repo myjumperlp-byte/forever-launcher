@@ -8,16 +8,30 @@ use std::path::Path;
 use std::process::{Child, Command};
 
 pub const WTF_NAME: &str = "ForeverLauncher.wtf";
+/// The client's own settings file, next to the one it is started with.
+const BASE_WTF: &str = "Config.wtf";
 #[cfg(not(target_os = "macos"))]
 const LAUNCH_OPTIONS: &str = r"Software\Blizzard Entertainment\Battle.net\Launch Options\WoW";
 
-/// WTF/ForeverLauncher.wtf: a copy of Config.wtf with the portal and the language set.
+/// WTF/Config.wtf and WTF/ForeverLauncher.wtf: the portal and the language, forced before every start.
+///
+/// The client saves its settings when it closes and writes `SET portal "EU"` back, so both files are set again on
+/// every start. The file the client is started with is left read-only: otherwise the next start would talk to
+/// Blizzard instead of this server, which only shows up as "you have been disconnected".
 pub fn write_wtf(settings: &Settings) -> Result<(), String> {
     let dir = Path::new(&settings.game_dir).join("WTF");
     std::fs::create_dir_all(&dir).map_err(|e| tf("wtf_folder", &[&e]))?;
-    let path = dir.join(WTF_NAME);
-    let base = dir.join("Config.wtf");
-    let text = std::fs::read_to_string(&path).or_else(|_| std::fs::read_to_string(&base)).unwrap_or_default();
+    // Config.wtf stays writable (the client saves its video settings there), the -config file is locked
+    write_portal(&dir, settings, BASE_WTF, false)?;
+    write_portal(&dir, settings, WTF_NAME, true)
+}
+
+fn write_portal(dir: &Path, settings: &Settings, name: &str, lock: bool) -> Result<(), String> {
+    let path = dir.join(name);
+    let shown = path.display().to_string();
+    // an earlier start may have left the file read-only
+    set_mode(&path, 0o644);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
     let wanted = [
         ("portal", settings.server.portal.clone()),
         ("textLocale", settings.locale.clone()),
@@ -31,8 +45,27 @@ pub fn write_wtf(settings: &Settings) -> Result<(), String> {
     for (k, v) in wanted {
         lines.push(format!("SET {k} \"{v}\""));
     }
-    std::fs::write(&path, lines.join("\r\n") + "\r\n").map_err(|e| format!("{} : {e}", path.display()))
+    std::fs::write(&path, lines.join("\r\n") + "\r\n").map_err(|e| format!("{shown} : {e}"))?;
+    // read back: a portal that did not make it into the file must not be discovered by the game
+    let back = std::fs::read_to_string(&path).map_err(|e| format!("{shown} : {e}"))?;
+    let want_line = format!("SET portal \"{}\"", settings.server.portal);
+    if !back.lines().any(|l| l.trim() == want_line) {
+        return Err(tf("wtf_not_written", &[&shown]));
+    }
+    if lock {
+        set_mode(&path, 0o444);
+    }
+    Ok(())
 }
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+
+#[cfg(not(unix))]
+fn set_mode(_: &Path, _: u32) {}
 
 /// Stores the login ticket where the client reads it with -launcherlogin.
 #[cfg(windows)]

@@ -160,22 +160,26 @@ const OLD_ADDRESSES: [&str; 2] = ["127.0.0.1", "192.168.178.42"];
 /// bnet, login REST and world port before the playit tunnel (8081 and 8085 are not published any more).
 const OLD_PORTS: (u16, u16, u16) = (1119, 8081, 8085);
 
-/// Replaces exactly those dead values with the ones this build was compiled with, so a settings.json written by
-/// an old launcher does not keep sending players to an address that no longer answers. Anything the player typed
-/// in himself stays untouched. true: something changed.
-fn migrate_server(server: &mut Server) -> bool {
-    let built_in = Server::default();
+/// Replaces exactly those dead values with `built_in` (the server this build was compiled with), so a
+/// settings.json written by an old launcher does not keep sending players to an address that no longer answers.
+/// Anything the player typed in himself stays untouched. true: something changed.
+fn migrate_server_to(server: &mut Server, built_in: &Server) -> bool {
     let dead = OLD_ADDRESSES.contains(&server.address.trim())
         && (server.bnet_port, server.rest_port, server.world_port) == OLD_PORTS;
     // a launcher built without FOREVER_SERVER_ADDRESS has the same address as its default: nothing to gain
     if !dead || OLD_ADDRESSES.contains(&built_in.address.as_str()) {
         return false;
     }
-    server.address = built_in.address;
+    server.address = built_in.address.clone();
     server.bnet_port = built_in.bnet_port;
     server.rest_port = built_in.rest_port;
     server.world_port = built_in.world_port;
     true
+}
+
+/// The migration as it runs on load: to the server compiled into this build.
+fn migrate_server(server: &mut Server) -> bool {
+    migrate_server_to(server, &Server::default())
 }
 
 impl Settings {
@@ -376,4 +380,92 @@ fn detect_game_dir() -> Option<String> {
         }
     }
     candidates.into_iter().find(|p| game_binary(p).exists()).map(|p| p.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The server the released builds get from the GitHub repository variables.
+    fn tunnel() -> Server {
+        Server {
+            name: "Legacy of Azeroth".into(),
+            portal: "trinity.actual.battle.net".into(),
+            address: "play.legacy-of-azeroth.com".into(),
+            bnet_port: 48989,
+            rest_port: 48990,
+            world_port: 48991,
+            public_key: STOCK_PUBLIC_KEY.into(),
+            region_group: 8,
+            website: "https://legacy-of-azeroth.com".into(),
+        }
+    }
+
+    /// What 1.0.0 wrote into settings.json: the LAN machine on the old ports.
+    fn release_1_0_0() -> Server {
+        Server { address: "192.168.178.42".into(), bnet_port: 1119, rest_port: 8081, world_port: 8085, ..tunnel() }
+    }
+
+    #[test]
+    fn lifts_a_1_0_0_settings_file_to_the_tunnel() {
+        let mut server = release_1_0_0();
+        assert!(migrate_server_to(&mut server, &tunnel()));
+        assert_eq!(server.address, "play.legacy-of-azeroth.com");
+        assert_eq!((server.bnet_port, server.rest_port, server.world_port), (48989, 48990, 48991));
+        // the rest of the file stays what it was
+        assert_eq!(server.portal, "trinity.actual.battle.net");
+        assert_eq!(server.name, "Legacy of Azeroth");
+        assert_eq!(server.website, "https://legacy-of-azeroth.com");
+    }
+
+    #[test]
+    fn lifts_the_loopback_default_too() {
+        let mut server = Server { address: "127.0.0.1".into(), ..release_1_0_0() };
+        assert!(migrate_server_to(&mut server, &tunnel()));
+        assert_eq!(server.address, "play.legacy-of-azeroth.com");
+        assert_eq!(server.world_port, 48991);
+    }
+
+    #[test]
+    fn leaves_a_server_a_player_entered_alone() {
+        // his own address, even on the old ports
+        let mut own = Server { address: "wow.example.test".into(), ..release_1_0_0() };
+        assert!(!migrate_server_to(&mut own, &tunnel()));
+        assert_eq!(own.address, "wow.example.test");
+        assert_eq!((own.bnet_port, own.rest_port, own.world_port), (1119, 8081, 8085));
+
+        // the old address with ports he changed himself is his setup too
+        let mut ports = Server { bnet_port: 49000, ..release_1_0_0() };
+        assert!(!migrate_server_to(&mut ports, &tunnel()));
+        assert_eq!(ports.address, "192.168.178.42");
+        assert_eq!(ports.bnet_port, 49000);
+    }
+
+    #[test]
+    fn does_not_rewrite_onto_a_build_without_an_address() {
+        // a local build: Server::default() is 127.0.0.1, so "migrating" to it would gain nothing
+        let mut server = release_1_0_0();
+        let dev = Server { address: "127.0.0.1".into(), ..tunnel() };
+        assert!(!migrate_server_to(&mut server, &dev));
+        assert_eq!(server.address, "192.168.178.42");
+    }
+
+    /// The release workflow passes FOREVER_SERVER_ADDRESS and the three port variables into the build, so a build
+    /// made in CI must carry the tunnel and never the dead 1.0.0 values as its default.
+    #[test]
+    fn the_ci_build_carries_the_tunnel() {
+        if option_env!("CI").is_none() {
+            return; // a local build without the repository variables
+        }
+        // the workflow must actually hand the variable to the compiler: this is what makes option_env! see it
+        assert!(option_env!("FOREVER_SERVER_ADDRESS").is_some(), "FOREVER_SERVER_ADDRESS did not reach the build");
+        assert!(option_env!("FOREVER_BNET_PORT").is_some(), "FOREVER_BNET_PORT did not reach the build");
+        assert!(option_env!("FOREVER_REST_PORT").is_some(), "FOREVER_REST_PORT did not reach the build");
+        assert!(option_env!("FOREVER_WORLD_PORT").is_some(), "FOREVER_WORLD_PORT did not reach the build");
+        let built_in = Server::default();
+        assert_eq!(built_in.address, "play.legacy-of-azeroth.com");
+        assert_eq!((built_in.bnet_port, built_in.rest_port, built_in.world_port), (48989, 48990, 48991));
+        assert!(!OLD_ADDRESSES.contains(&built_in.address.as_str()));
+        assert_ne!((built_in.bnet_port, built_in.rest_port, built_in.world_port), OLD_PORTS);
+    }
 }

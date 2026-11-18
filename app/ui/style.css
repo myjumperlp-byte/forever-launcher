@@ -37,27 +37,12 @@ a:hover { text-decoration: underline; }
 .backdrop { position: fixed; inset: 0; z-index: -1; overflow: hidden; }
 .bg {
   position: absolute; inset: -3%;
-  background-size: cover; background-position: center 35%;
+  background-image: url("background.webp");
+  background-size: cover; background-position: center 45%;
   opacity: 0; transition: opacity 1.6s ease;
 }
 .bg.on { opacity: 1; animation: drift 24s ease-out both; }
 @keyframes drift { from { transform: scale(1.08); } to { transform: scale(1); } }
-/* neutral art drawn in CSS (no game artwork in this repo); put your own images here if you have the rights */
-.bg.scene-1 { background:
-  radial-gradient(60% 50% at 75% 30%, rgba(64, 140, 220, 0.55), transparent 70%),
-  radial-gradient(45% 40% at 20% 70%, rgba(31, 111, 134, 0.55), transparent 70%),
-  radial-gradient(30% 25% at 55% 85%, rgba(241, 196, 91, 0.25), transparent 70%),
-  linear-gradient(160deg, #0d1a3a, #070a14 70%); }
-.bg.scene-2 { background:
-  radial-gradient(55% 45% at 30% 30%, rgba(140, 70, 200, 0.45), transparent 70%),
-  radial-gradient(50% 45% at 80% 70%, rgba(20, 142, 255, 0.35), transparent 70%),
-  radial-gradient(25% 25% at 60% 20%, rgba(241, 196, 91, 0.2), transparent 70%),
-  linear-gradient(200deg, #1a1036, #070a14 70%); }
-.bg.scene-3 { background:
-  radial-gradient(55% 50% at 70% 60%, rgba(40, 170, 140, 0.4), transparent 70%),
-  radial-gradient(45% 40% at 25% 25%, rgba(20, 110, 200, 0.45), transparent 70%),
-  radial-gradient(30% 30% at 40% 90%, rgba(241, 160, 70, 0.22), transparent 70%),
-  linear-gradient(130deg, #0a2230, #070a14 70%); }
 .shade {
   position: absolute; inset: 0;
   background:
@@ -75,8 +60,9 @@ a:hover { text-decoration: underline; }
 .topbar > .top-logo { grid-column: 1; justify-self: start; }
 .top-logo { display: grid; line-height: 1; text-decoration: none; filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.6)); }
 .top-logo strong {
-  font: 700 30px/1 Georgia, "Times New Roman", serif; letter-spacing: 0.12em;
+  font: 700 clamp(17px, 2.3vw, 26px)/1.1 Georgia, "Times New Roman", serif; letter-spacing: 0.14em;
   background: linear-gradient(180deg, #fff3cf, #f1c45b 55%, #b8822a); -webkit-background-clip: text; background-clip: text; color: transparent;
+  max-width: 46vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .top-logo small { margin-top: 5px; font-size: 10.5px; font-weight: 700; letter-spacing: 0.22em; text-transform: uppercase; color: rgba(255, 255, 255, 0.7); }
 .status {

@@ -107,7 +107,7 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("admin_refused", ["autorisation administrateur refusée", "administrator permission refused", "permiso de administrador denegado", "permissão de administrador recusada"]),
     ("install_wait", ["attente de l'installation impossible", "could not wait for the installation", "no se pudo esperar a la instalación", "não foi possível aguardar a instalação"]),
     ("install_failed", ["échec de l'installation (code {})", "installation failed (code {})", "la instalación falló (código {})", "a instalação falhou (código {})"]),
-    ("hosts_prompt", ["Forever Launcher : ajout du serveur dans le fichier hosts.", "Forever Launcher: adding the server to the hosts file.", "Forever Launcher: añadiendo el servidor al archivo hosts.", "Forever Launcher: adicionando o servidor ao arquivo hosts."]),
+    ("hosts_prompt", ["Legacy of Azeroth : ajout du serveur dans le fichier hosts.", "Legacy of Azeroth: adding the server to the hosts file.", "Legacy of Azeroth: añadiendo el servidor al archivo hosts.", "Legacy of Azeroth: adicionando o servidor ao arquivo hosts."]),
     ("hosts_refused", ["autorisation refusée pour le fichier hosts", "permission refused for the hosts file", "permiso denegado para el archivo hosts", "permissão recusada para o arquivo hosts"]),
     ("hosts_write_failed", ["écriture du fichier hosts impossible : {}", "could not write the hosts file: {}", "no se pudo escribir el archivo hosts: {}", "não foi possível gravar o arquivo hosts: {}"]),
     ("hosts_write_failed_pkexec", ["écriture du fichier hosts impossible (pkexec)", "could not write the hosts file (pkexec)", "no se pudo escribir el archivo hosts (pkexec)", "não foi possível gravar o arquivo hosts (pkexec)"]),

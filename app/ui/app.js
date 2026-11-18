@@ -1,4 +1,4 @@
-// Forever Launcher UI. Everything privileged happens in Rust (src-tauri); this file only calls its commands.
+// Legacy of Azeroth launcher UI. Everything privileged happens in Rust (src-tauri); this file only calls its commands.
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const $ = (id) => document.getElementById(id);
@@ -40,14 +40,14 @@ function setLanguage(setting) {
 async function refresh() {
   state = await invoke('get_state');
   setLanguage(state.settings.language);
-  $('realm-field').textContent = t('realm', { name: state.settings.server.name || 'Forever' });
+  $('realm-field').textContent = t('realm', { name: state.settings.server.name || 'Legacy of Azeroth' });
   $('version').textContent = `v${state.version} · ${{ windows: 'Windows', macos: 'macOS', linux: 'Linux' }[state.platform]}`;
   $('signup').hidden = !state.settings.server.website;
   const logged = !!state.email;
   $('view-login').hidden = logged;
   $('view-play').hidden = !logged;
   $('account').hidden = !logged;
-  $('game-field').textContent = `WoW Forever ${state.gameVersion || '1.60.1.70938'}`;
+  $('game-field').textContent = `${state.settings.server.name || 'Legacy of Azeroth'} ${state.gameVersion || '1.60.1.70938'}`;
   if (logged) {
     $('account-email').textContent = state.email;
     $('avatar').textContent = state.email[0].toUpperCase();
@@ -359,20 +359,7 @@ async function refreshNews() {
   }));
 }
 
-// ------------------------------------------------------------------------------------------------ background
-function rotateBackground() {
-  const slides = [...document.querySelectorAll('.backdrop .bg')];
-  let current = Math.floor(Math.random() * slides.length);
-  slides[current].classList.add('on');
-  setInterval(() => {
-    slides[current].classList.remove('on');
-    current = (current + 1) % slides.length;
-    slides[current].classList.add('on');
-  }, 20000);
-}
-
 // ------------------------------------------------------------------------------------------------ start
-rotateBackground();
 (async () => {
   await refresh();
   refreshStatus();

@@ -4,6 +4,11 @@
 //! u32 id (1..12), 32-byte key, u8 flag, 3 bytes padding. The server signs EnterEncryptedMode with the key of
 //! `Network.EnterEncryptedModeRegionGroup` (8), so that entry gets the server's key. Same logic as the official
 //! forever-launcher-linux.py, except that the first padding byte is ignored (7f on Windows, 00 or 07 under Proton).
+//!
+//! Blizzard's keys change with client builds, so the table below is only the fast path: when it no longer matches
+//! (the live client since build 1.60.1.70790 ships its own table), the store is recognised by its structure alone —
+//! ids 1..12, the flags, the zero padding and twelve different keys that are not text. That keeps a client update
+//! from breaking the start until the launcher is rebuilt with the new keys.
 
 #[cfg(not(windows))]
 mod lin;
@@ -18,6 +23,7 @@ pub use win::{find_client, ProcessMemory};
 
 use crate::i18n::{t, tf};
 use memchr::memmem;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 const KNOWN_KEYS: [&str; 12] = [
@@ -39,6 +45,8 @@ const ENTRY: usize = 40;
 const COUNT: usize = 12;
 const BLOCK: usize = ENTRY * COUNT;
 const CHUNK: usize = 8 * 1024 * 1024;
+/// How often the slower structure-only scan is repeated while no store is found.
+const STRUCTURAL_EVERY: Duration = Duration::from_secs(5);
 
 /// Access to another process's memory.
 pub trait Memory {
@@ -74,6 +82,11 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
     hex::decode(s).ok()?.try_into().ok()
 }
 
+/// An Ed25519 public key as it sits in the store: not zero, and not a readable string.
+fn key_shaped(key: &[u8]) -> bool {
+    key.iter().any(|b| *b != 0) && key.iter().filter(|b| b.is_ascii_graphic()).count() <= 8
+}
+
 impl Patcher {
     pub fn new(public_key: &str, region_group: u32) -> Result<Self, String> {
         let new_key = hex32(public_key).ok_or(t("bad_public_key"))?;
@@ -83,7 +96,8 @@ impl Patcher {
         Ok(Self { keys: KNOWN_KEYS.iter().map(|k| hex32(k).unwrap()).collect(), new_key, group: region_group as usize })
     }
 
-    fn state(&self, mem: &dyn Memory, array: u64) -> State {
+    /// The table of the builds this launcher was written against.
+    fn exact_state(&self, mem: &dyn Memory, array: u64) -> State {
         let Some(raw) = mem.read(array, BLOCK) else { return State::Invalid };
         if raw.len() != BLOCK {
             return State::Invalid;
@@ -104,7 +118,31 @@ impl Patcher {
         if raw[t..t + 32] == self.new_key { State::Patched } else { State::Original }
     }
 
-    fn find_stores(&self, mem: &dyn Memory) -> Vec<(u64, State)> {
+    /// Same store after a client update changed the keys: only the shape of the table is checked.
+    fn structural_state(&self, mem: &dyn Memory, array: u64) -> State {
+        let Some(raw) = mem.read(array, BLOCK) else { return State::Invalid };
+        if raw.len() != BLOCK {
+            return State::Invalid;
+        }
+        let mut seen: HashSet<&[u8]> = HashSet::new();
+        for e in 0..COUNT {
+            let o = e * ENTRY;
+            if u32::from_le_bytes(raw[o..o + 4].try_into().unwrap()) != e as u32 + 1 {
+                return State::Invalid;
+            }
+            if raw[o + 36] != EXPECTED_FLAGS[e] || raw[o + 38..o + 40] != [0, 0] {
+                return State::Invalid;
+            }
+            let key = &raw[o + 4..o + 36];
+            if !key_shaped(key) || !seen.insert(key) {
+                return State::Invalid;
+            }
+        }
+        let t = (self.group - 1) * ENTRY + 4;
+        if raw[t..t + 32] == self.new_key { State::Patched } else { State::Original }
+    }
+
+    fn find_stores_exact(&self, mem: &dyn Memory) -> Vec<(u64, State)> {
         let needle = &self.keys[0];
         let finder = memmem::Finder::new(needle);
         let mut found = Vec::new();
@@ -116,7 +154,7 @@ impl Patcher {
                 for i in finder.find_iter(&buf) {
                     let hit = off + i as u64;
                     if hit % 4 == 0 && hit >= 4 {
-                        let st = self.state(mem, hit - 4);
+                        let st = self.exact_state(mem, hit - 4);
                         if st != State::Invalid {
                             found.push((hit - 4, st));
                         }
@@ -133,17 +171,62 @@ impl Patcher {
         found
     }
 
+    /// Scans every 4-byte aligned address for entry id 1 and validates the block. Slower, but independent of the
+    /// keys the client ships.
+    fn find_stores_structural(&self, mem: &dyn Memory) -> Vec<(u64, State)> {
+        let mut found = Vec::new();
+        for (lo, hi) in mem.regions() {
+            let mut off = lo;
+            while off < hi {
+                let take = CHUNK.min((hi - off) as usize);
+                let Some(buf) = mem.read(off, take) else { break };
+                let mut i = 0usize;
+                while i + 4 <= buf.len() {
+                    if u32::from_le_bytes(buf[i..i + 4].try_into().unwrap()) == 1 {
+                        let hit = off + i as u64;
+                        let st = self.structural_state(mem, hit);
+                        if st != State::Invalid {
+                            found.push((hit, st));
+                        }
+                    }
+                    i += 4;
+                }
+                if take < CHUNK {
+                    break;
+                }
+                off += (CHUNK - 4) as u64;
+            }
+        }
+        found.sort_by_key(|f| f.0);
+        found.dedup_by_key(|f| f.0);
+        found
+    }
+
+    /// (stores, recognised by structure only)
+    fn find_stores(&self, mem: &dyn Memory) -> (Vec<(u64, State)>, bool) {
+        let exact = self.find_stores_exact(mem);
+        if !exact.is_empty() {
+            return (exact, false);
+        }
+        (self.find_stores_structural(mem), true)
+    }
+
     fn patch(&self, mem: &dyn Memory, array: u64) -> Result<(), String> {
         let addr = array + ((self.group - 1) * ENTRY + 4) as u64;
         for _ in 0..20 {
             match mem.read(addr, 32) {
-                Some(cur) if cur == self.keys[self.group - 1] => {
+                Some(cur) if cur.len() == 32 => {
+                    if cur == self.new_key {
+                        return Ok(());
+                    }
                     if !mem.write(addr, &self.new_key) {
                         return Err(t("write_refused").into());
                     }
-                    return if self.state(mem, array) == State::Patched { Ok(()) } else { Err(t("verify_failed").into()) };
+                    return match mem.read(addr, 32) {
+                        Some(back) if back == self.new_key => Ok(()),
+                        _ => Err(t("verify_failed").into()),
+                    };
                 }
-                Some(cur) if cur == self.new_key => return Ok(()),
                 _ => std::thread::sleep(Duration::from_millis(300)),
             }
         }
@@ -154,9 +237,13 @@ impl Patcher {
     /// is found before the real game process).
     pub fn watch(&self, mut mem: Box<dyn Memory>, mut switch: impl FnMut(&dyn Memory) -> Option<Box<dyn Memory>>,
                  mut emit: impl FnMut(Event)) {
-        let mut store: Option<u64> = None;
+        // (store, recognised by structure only)
+        let mut store: Option<(u64, bool)> = None;
         let mut last_switch = Instant::now();
+        let mut last_structural = Instant::now() - STRUCTURAL_EVERY;
+        let mut started = Instant::now();
         let mut said_waiting = false;
+        let mut said_missing = false;
         loop {
             if !mem.alive() {
                 if let Some(other) = switch(mem.as_ref()) {
@@ -166,8 +253,9 @@ impl Patcher {
                 emit(Event::Closed);
                 return;
             }
-            if let Some(array) = store {
-                match self.state(mem.as_ref(), array) {
+            if let Some((array, structural)) = store {
+                let state = if structural { self.structural_state(mem.as_ref(), array) } else { self.exact_state(mem.as_ref(), array) };
+                match state {
                     State::Patched => std::thread::sleep(Duration::from_secs(2)),
                     State::Original => match self.patch(mem.as_ref(), array) {
                         Ok(()) => {
@@ -193,7 +281,13 @@ impl Patcher {
                     mem = other;
                 }
             }
-            let stores = self.find_stores(mem.as_ref());
+            // the exact table is cheap to look for; the structure-only scan is the fallback after a client update
+            let (stores, structural) = if last_structural.elapsed() >= STRUCTURAL_EVERY {
+                last_structural = Instant::now();
+                self.find_stores(mem.as_ref())
+            } else {
+                (self.find_stores_exact(mem.as_ref()), false)
+            };
             match stores.as_slice() {
                 [(array, st)] => {
                     let res = if *st == State::Patched { Ok(()) } else { self.patch(mem.as_ref(), *array) };
@@ -201,7 +295,7 @@ impl Patcher {
                         Ok(()) => {
                             emit(Event::Log(tf("key_written", &[&self.group])));
                             emit(Event::Ready);
-                            store = Some(*array);
+                            store = Some((*array, structural));
                         }
                         Err(e) => emit(Event::Log(tf("key_write_retry", &[&e]))),
                     }
@@ -211,12 +305,20 @@ impl Patcher {
                         emit(Event::Log(t("waiting_realm").into()));
                         said_waiting = true;
                     }
+                    if !said_missing && started.elapsed() > Duration::from_secs(20) {
+                        emit(Event::Log(t("key_store_missing").into()));
+                        said_missing = true;
+                    }
                     std::thread::sleep(Duration::from_millis(150));
                 }
                 many => {
                     emit(Event::Log(tf("many_key_stores", &[&many.len()])));
                     std::thread::sleep(Duration::from_millis(500));
                 }
+            }
+            // keep the start time of the missing notice meaningful even if the game takes long to boot
+            if started.elapsed() > Duration::from_secs(600) {
+                started = Instant::now();
             }
         }
     }

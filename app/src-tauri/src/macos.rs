@@ -74,6 +74,15 @@ pub fn prepare_copy(settings: &Settings, mut progress: impl FnMut(&str)) -> Resu
     run("ditto", &[os(&original), os(&tmp)])?;
     run("xattr", &["-cr".as_ref(), os(&tmp)])?;
 
+    // macOS blocks connections to the local network for apps that do not say why they need it, and it does so
+    // silently (the client only reports "you have been disconnected"). With this key the system asks the player.
+    let plist = tmp.join("Contents/Info.plist");
+    if plist.is_file() {
+        let _ = run("plutil", &["-remove".as_ref(), "NSLocalNetworkUsageDescription".as_ref(), os(&plist)]);
+        run("plutil", &["-insert".as_ref(), "NSLocalNetworkUsageDescription".as_ref(), "-string".as_ref(),
+                        t("local_network_reason").as_ref(), os(&plist)])?;
+    }
+
     progress(t("mac_signing"));
     // nested code first: helper apps, then the files next to the executable (icudt*.dat: codesign refuses the
     // app while they are unsigned), then the app itself
@@ -150,16 +159,42 @@ fn encrypt_ticket(ticket: &str, user: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// One value as the client will read it from the net.battle preferences.
+fn read_pref(key: &str) -> Option<String> {
+    let out = Command::new("defaults").args(["read", "net.battle", key]).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Stores the login ticket where the client reads it with -launcherlogin (net.battle preferences).
 pub fn write_launch_options(portal: &str, ticket: &str, game_account: &str) -> Result<(), String> {
     let user = std::env::var("USER").map_err(|_| t("mac_user").to_string())?;
     let token = hex::encode(encrypt_ticket(ticket, &user)?);
-    for (key, kind, value) in [
-        ("Launch Options/WoW/WEB_TOKEN", "-data", token.as_str()),
-        ("Launch Options/WoW/GAME_ACCOUNT", "-string", game_account),
-        ("Launch Options/WoW/CONNECTION_STRING", "-string", portal),
+    // the beta product was "WoW", the live client is "WoWF": both are written, each client reads its own one
+    for product in ["WoW", "WoWF"] {
+        for (key, kind, value) in [
+            (format!("Launch Options/{product}/WEB_TOKEN"), "-data", token.as_str()),
+            (format!("Launch Options/{product}/GAME_ACCOUNT"), "-string", game_account),
+            (format!("Launch Options/{product}/CONNECTION_STRING"), "-string", portal),
+        ] {
+            run("defaults", &["write".as_ref(), "net.battle".as_ref(), key.as_str().as_ref(), kind.as_ref(), value.as_ref()])?;
+        }
+    }
+    // read back: the client closes the connection before connecting if a value is missing or still the old one,
+    // and that looks exactly like a server that is down
+    for (key, expected) in [
+        ("Launch Options/WoW/CONNECTION_STRING", portal.to_string()),
+        ("Launch Options/WoW/GAME_ACCOUNT", game_account.to_string()),
     ] {
-        run("defaults", &["write".as_ref(), "net.battle".as_ref(), key.as_ref(), kind.as_ref(), value.as_ref()])?;
+        if read_pref(key).as_deref() != Some(expected.as_str()) {
+            return Err(tf("prefs_not_written", &[&key]));
+        }
+    }
+    // `defaults read` prints data as "{length = N, bytes = 0x...}"; spaces are stripped below, so the needle has none
+    let want = format!("length={}", token.len() / 2);
+    if !read_pref("Launch Options/WoW/WEB_TOKEN").is_some_and(|v| v.replace(' ', "").contains(&want)) {
+        return Err(tf("prefs_not_written", &[&"Launch Options/WoW/WEB_TOKEN"]));
     }
     Ok(())
 }

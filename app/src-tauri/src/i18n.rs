@@ -46,16 +46,25 @@ const MESSAGES: &[(&str, Texts)] = &[
     // launch steps
     ("step_connecting", ["Connexion au serveur…", "Connecting to the server…", "Conectando con el servidor…", "Conectando ao servidor…"]),
     ("step_preparing", ["Préparation du jeu…", "Preparing the game…", "Preparando el juego…", "Preparando o jogo…"]),
+    ("cert_renewed", ["certificat du serveur renouvelé", "server certificate renewed", "certificado del servidor renovado", "certificado do servidor renovado"]),
     ("step_launching", ["Lancement de World of Warcraft…", "Starting World of Warcraft…", "Iniciando World of Warcraft…", "Iniciando World of Warcraft…"]),
     ("running", ["Jeu lancé : connectez-vous au royaume", "Game started: log in to the realm", "Juego iniciado: entra al reino", "Jogo iniciado: entre no reino"]),
     ("ready", ["Clé du serveur en place : entrez dans le royaume", "Server key in place: enter the realm", "Clave del servidor lista: entra al reino", "Chave do servidor pronta: entre no reino"]),
     ("closed", ["Le jeu est fermé", "The game is closed", "El juego se cerró", "O jogo foi fechado"]),
-    ("not_started", ["Le jeu n'a pas démarré (aucun WowB.exe trouvé en 3 minutes)", "The game did not start (no WowB.exe found within 3 minutes)", "El juego no arrancó (no se encontró WowB.exe en 3 minutos)", "O jogo não iniciou (nenhum WowB.exe encontrado em 3 minutos)"]),
+    ("not_started", ["Le jeu n'a pas démarré (aucun Wow.exe trouvé en 3 minutes)", "The game did not start (no Wow.exe found within 3 minutes)", "El juego no arrancó (no se encontró Wow.exe en 3 minutos)", "O jogo não iniciou (nenhum Wow.exe encontrado em 3 minutos)"]),
     ("mac_copying", ["Copie du jeu pour Forever (première fois ou après une mise à jour)…", "Copying the game for Forever (first time or after an update)…", "Copiando el juego para Forever (primera vez o tras una actualización)…", "Copiando o jogo para o Forever (primeira vez ou após uma atualização)…"]),
     ("mac_signing", ["Signature de la copie du jeu…", "Signing the game copy…", "Firmando la copia del juego…", "Assinando a cópia do jogo…"]),
+    // macOS: why the game may access the local network (shown in the system's permission dialog)
+    ("local_network_reason", ["Se connecter au serveur Forever sur votre réseau local", "Connect to the Forever server on your local network", "Conectarse al servidor Forever en su red local", "Conectar-se ao servidor Forever na sua rede local"]),
+    // preparation: a value that did not end up where the client reads it
+    ("wtf_not_written", ["le portail n'a pas pu être écrit dans {}", "the portal could not be written to {}", "no se pudo escribir el portal en {}", "não foi possível gravar o portal em {}"]),
+    ("prefs_not_written", ["la préférence {} n'a pas été enregistrée", "preference {} was not stored", "la preferencia {} no se guardó", "a preferência {} não foi gravada"]),
+    // macOS: the loopback relay the game connects to (Local Network privacy would block the server's address)
+    ("relay_busy", ["{} est déjà utilisé par un autre programme", "{} is already in use by another program", "{} ya está en uso por otro programa", "{} já está em uso por outro programa"]),
+    ("relay_bind", ["le port {} est déjà utilisé ({})", "port {} is already in use ({})", "el puerto {} ya está en uso ({})", "a porta {} já está em uso ({})"]),
     // launch errors
     ("already_running", ["le jeu est déjà lancé", "the game is already running", "el juego ya está abierto", "o jogo já está aberto"]),
-    ("game_not_found", ["jeu introuvable : choisissez le dossier _classic_beta_ dans les paramètres", "game not found: choose the _classic_beta_ folder in the settings", "juego no encontrado: elige la carpeta _classic_beta_ en los ajustes", "jogo não encontrado: escolha a pasta _classic_beta_ nas configurações"]),
+    ("game_not_found", ["jeu introuvable : choisissez le dossier _forever_ dans les paramètres", "game not found: choose the _forever_ folder in the settings", "juego no encontrado: elige la carpeta _forever_ en los ajustes", "jogo não encontrado: escolha a pasta _forever_ nas configurações"]),
     ("login_first", ["connectez-vous d'abord", "log in first", "inicia sesión primero", "entre na sua conta primeiro"]),
     ("session_expired", ["session expirée : reconnectez-vous", "session expired: log in again", "sesión caducada: vuelve a iniciar sesión", "sessão expirada: entre novamente"]),
     ("session_save", ["enregistrement de la session : {}", "saving the session: {}", "guardando la sesión: {}", "salvando a sessão: {}"]),
@@ -90,6 +99,7 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("cert_missing", ["certificat du serveur non installé", "server certificate not installed", "certificado del servidor no instalado", "certificado do servidor não instalado"]),
     ("cert_ok_macos", ["certificat du serveur approuvé par macOS", "server certificate trusted by macOS", "certificado del servidor aprobado por macOS", "certificado do servidor aprovado pelo macOS"]),
     ("cert_not_trusted", ["certificat du serveur non approuvé", "server certificate not trusted", "certificado del servidor no aprobado", "certificado do servidor não aprovado"]),
+    ("cert_not_installed", ["certificat du serveur différent de celui installé ici", "server certificate differs from the one installed here", "certificado del servidor distinto del instalado aquí", "certificado do servidor diferente do instalado aqui"]),
     ("cert_ok_prefix", ["certificat installé dans le préfixe Wine", "certificate installed in the Wine prefix", "certificado instalado en el prefijo de Wine", "certificado instalado no prefixo do Wine"]),
     ("prefix_missing", ["préfixe Wine pas encore créé", "Wine prefix not created yet", "prefijo de Wine aún no creado", "prefixo do Wine ainda não criado"]),
     ("cert_not_in_prefix", ["certificat absent du préfixe Wine", "certificate missing from the Wine prefix", "certificado ausente del prefijo de Wine", "certificado ausente do prefixo do Wine"]),
@@ -121,6 +131,7 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("key_write_retry", ["écriture de la clé : {}, nouvel essai", "writing the key: {}, retrying", "escribiendo la clave: {}, reintentando", "gravando a chave: {}, tentando de novo"]),
     ("waiting_realm", ["en attente de l'entrée dans le royaume…", "waiting for the realm login…", "esperando la entrada al reino…", "aguardando a entrada no reino…"]),
     ("many_key_stores", ["{} magasins de clés à la fois : attente", "{} key stores at once: waiting", "{} almacenes de claves a la vez: esperando", "{} repositórios de chaves ao mesmo tempo: aguardando"]),
+    ("key_store_missing", ["magasin de clés introuvable : cette version du client n'est peut-être pas encore prise en charge", "key store not found: this client build may not be supported yet", "repositorio de claves no encontrado: puede que esta versión del cliente aún no sea compatible", "repositório de chaves não encontrado: talvez esta versão do cliente ainda não seja suportada"]),
 ];
 
 #[cfg(test)]

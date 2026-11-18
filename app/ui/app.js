@@ -47,7 +47,7 @@ async function refresh() {
   $('view-login').hidden = logged;
   $('view-play').hidden = !logged;
   $('account').hidden = !logged;
-  $('game-field').textContent = `WoW Forever ${state.gameVersion || '1.60.1.70450'}`;
+  $('game-field').textContent = `WoW Forever ${state.gameVersion || '1.60.1.70938'}`;
   if (logged) {
     $('account-email').textContent = state.email;
     $('avatar').textContent = state.email[0].toUpperCase();
@@ -149,7 +149,17 @@ $('signup-link').addEventListener('click', (ev) => {
 });
 
 // ------------------------------------------------------------------------------------------------ play
+// One click, one attempt. Without the guard a second click while the start is running fires another play
+// command, and the error the backstop then returns clears state.playing although the first start is still going.
+let playInFlight = false;
+let lastPlayAt = 0;
+
 $('play').addEventListener('click', async () => {
+  const now = Date.now();
+  // running attempt, or the same physical press delivered twice: do nothing
+  if (playInFlight || now - lastPlayAt < 300) return;
+  playInFlight = true;
+  lastPlayAt = now;
   $('log').textContent = '';
   state.playing = true;
   updatePlayButton();
@@ -162,6 +172,8 @@ $('play').addEventListener('click', async () => {
     setStep(String(e), 'err');
     log(t('error', { e }));
     refresh();   // an expired session sends back to the login view
+  } finally {
+    playInFlight = false;
   }
 });
 
@@ -229,7 +241,7 @@ function gameDirState() {
   const el = $('game-dir-state');
   const dir = $('s-game-dir').value.trim();
   const same = dir === state.settings.gameDir;
-  const game = state.platform === 'macos' ? t('gameApp') : 'WowB.exe';
+  const game = state.platform === 'macos' ? t('gameApp') : 'Wow.exe';
   el.textContent = !dir ? t('noFolder') : same && state.gameFound ? t('gameFound', { game }) : same ? t('gameMissing', { game }) : '';
   el.className = 'small ' + (same && state.gameFound ? 'ok' : dir && same ? 'ko' : '');
 }

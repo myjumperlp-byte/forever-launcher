@@ -29,6 +29,11 @@ fn built_in(value: Option<&'static str>, default: &str) -> String {
     value.filter(|v| !v.trim().is_empty()).unwrap_or(default).trim().to_string()
 }
 
+/// A build-time port (FOREVER_BNET_PORT...), for servers published through a tunnel with its own ports.
+fn built_in_port(value: Option<&'static str>, default: u16) -> u16 {
+    value.and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
 /// Your server, from the FOREVER_SERVER_NAME / FOREVER_SERVER_ADDRESS / FOREVER_WEBSITE variables at build time.
 /// Players can still change them in Settings > Server (advanced).
 impl Default for Server {
@@ -37,9 +42,10 @@ impl Default for Server {
             name: built_in(option_env!("FOREVER_SERVER_NAME"), "Forever"),
             portal: "trinity.actual.battle.net".into(),
             address: built_in(option_env!("FOREVER_SERVER_ADDRESS"), "127.0.0.1"),
-            bnet_port: 1119,
-            rest_port: 8081,
-            world_port: 8085,
+            // one playit tunnel, three consecutive ports (48989 bnet, 48990 login REST, 48991 world)
+            bnet_port: built_in_port(option_env!("FOREVER_BNET_PORT"), 48989),
+            rest_port: built_in_port(option_env!("FOREVER_REST_PORT"), 48990),
+            world_port: built_in_port(option_env!("FOREVER_WORLD_PORT"), 48991),
             public_key: STOCK_PUBLIC_KEY.into(),
             region_group: 8,
             website: built_in(option_env!("FOREVER_WEBSITE"), ""),
@@ -74,7 +80,7 @@ impl Default for LinuxSettings {
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub server: Server,
-    /// The `_classic_beta_` folder (contains WowB.exe, or the game .app on macOS).
+    /// The client's channel folder: `_forever_` (Wow.exe) or `_classic_beta_` (WowB.exe); the game .app on macOS.
     pub game_dir: String,
     /// textLocale / audioLocale, e.g. frFR.
     pub locale: String,
@@ -146,7 +152,7 @@ impl Settings {
         write_private(&config_dir().join("settings.json"), &serde_json::to_vec_pretty(self).unwrap())
     }
 
-    /// WowB.exe (Windows, Linux/Wine) or the game .app (macOS).
+    /// Wow.exe / WowB.exe (Windows, Linux/Wine) or the game .app (macOS).
     pub fn exe(&self) -> PathBuf {
         game_binary(Path::new(&self.game_dir))
     }
@@ -170,30 +176,82 @@ impl Session {
     }
 }
 
-/// Language the client was installed with, from the Tags column of .build.info next to the game folder.
-pub fn installed_locale(game_dir: &Path) -> Option<String> {
-    let info = std::fs::read_to_string(game_dir.parent()?.join(".build.info")).ok()?;
-    let line = info.lines().find(|l| l.contains("wow_classic_beta"))?;
-    LOCALES.iter().find(|l| line.contains(&format!("{l} text"))).map(|l| l.to_string())
+/// Battle.net product of the live Forever client: `_forever_\Wow.exe` (since build 1.60.1.70790).
+pub const PRODUCT_LIVE: &str = "wowf";
+/// Battle.net product of the Classic beta client: `_classic_beta_\WowB.exe` (builds up to 1.60.1.70450).
+pub const PRODUCT_BETA: &str = "wow_classic_beta";
+pub const LIVE_DIR: &str = "_forever_";
+pub const BETA_DIR: &str = "_classic_beta_";
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub const LIVE_EXE: &str = "Wow.exe";
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub const BETA_EXE: &str = "WowB.exe";
+
+/// Product of the channel folder the player picked (`_forever_` = live client, anything else = the old beta).
+pub fn product_for(game_dir: &Path) -> &'static str {
+    match game_dir.file_name().map(|n| n.to_string_lossy().to_lowercase()) {
+        Some(name) if name == BETA_DIR => PRODUCT_BETA,
+        _ => PRODUCT_LIVE,
+    }
 }
 
-/// Full client version (e.g. 1.60.1.70450), from the Version column of .build.info next to the game folder.
+/// `.build.info` next to the channel folder: its header and one row per installed product.
+struct BuildInfo {
+    header: Vec<String>,
+    rows: Vec<Vec<String>>,
+}
+
+impl BuildInfo {
+    fn read(game_dir: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(game_dir.parent()?.join(".build.info")).ok()?;
+        let mut lines = text.lines();
+        let header = cells(lines.next()?);
+        Some(Self { header, rows: lines.map(cells).collect() })
+    }
+
+    fn column(&self, name: &str) -> Option<usize> {
+        self.header.iter().position(|c| c == name)
+    }
+
+    /// The row of the picked channel, else the row of any Forever product (the beta and the live client can be
+    /// installed next to each other).
+    fn row(&self, game_dir: &Path) -> Option<&Vec<String>> {
+        let product = self.column("Product")?;
+        let wanted = product_for(game_dir);
+        self.rows.iter().find(|r| r.get(product).map(String::as_str) == Some(wanted)).or_else(|| {
+            self.rows.iter().find(|r| r.get(product).is_some_and(|p| p == PRODUCT_LIVE || p == PRODUCT_BETA))
+        })
+    }
+}
+
+fn cells(line: &str) -> Vec<String> {
+    line.split('|').map(|c| c.split('!').next().unwrap_or("").to_string()).collect()
+}
+
+/// Language installed with the client in that folder (to preselect it).
+pub fn installed_locale(game_dir: &Path) -> Option<String> {
+    let info = BuildInfo::read(game_dir)?;
+    let row = info.row(game_dir)?;
+    let tags = row.get(info.column("Tags")?)?;
+    LOCALES.iter().find(|l| tags.contains(&format!("{l} text"))).map(|l| l.to_string())
+}
+
+/// Full client version (e.g. 1.60.1.70938), from the Version column of .build.info next to the game folder.
 pub fn installed_version(game_dir: &Path) -> Option<String> {
-    let info = std::fs::read_to_string(game_dir.parent()?.join(".build.info")).ok()?;
-    let mut lines = info.lines();
-    let header: Vec<&str> = lines.next()?.split('|').map(|c| c.split('!').next().unwrap_or("")).collect();
-    let version = header.iter().position(|c| *c == "Version")?;
-    let product = header.iter().position(|c| *c == "Product")?;
-    lines
-        .map(|l| l.split('|').collect::<Vec<_>>())
-        .find(|row| row.get(product) == Some(&"wow_classic_beta"))
-        .and_then(|row| row.get(version).map(|v| v.to_string()))
-        .filter(|v| !v.is_empty())
+    let info = BuildInfo::read(game_dir)?;
+    let row = info.row(game_dir)?;
+    let version = row.get(info.column("Version")?)?.clone();
+    (!version.is_empty()).then_some(version)
 }
 
 #[cfg(not(target_os = "macos"))]
 fn game_binary(dir: &Path) -> PathBuf {
-    dir.join("WowB.exe")
+    // the live client since build 70790; an old beta install keeps working as a fallback
+    let live = dir.join(LIVE_EXE);
+    if live.is_file() {
+        return live;
+    }
+    dir.join(BETA_EXE)
 }
 
 /// Re-signed copy of the game app that the launcher starts on macOS (see macos.rs), next to the original.
@@ -221,26 +279,33 @@ fn game_binary(dir: &Path) -> PathBuf {
         .unwrap_or_else(|| dir.join("World of Warcraft.app"))
 }
 
+/// Both channel folders of an install (`_forever_` first).
+fn channel_dirs(parent: &Path) -> [PathBuf; 2] {
+    [parent.join(LIVE_DIR), parent.join(BETA_DIR)]
+}
+
 fn detect_game_dir() -> Option<String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     #[cfg(windows)]
     for root in ["C:\\Program Files (x86)", "C:\\Program Files", "D:\\", "D:\\Games", "E:\\", "E:\\Games"] {
-        candidates.push(Path::new(root).join("World of Warcraft").join("_classic_beta_"));
+        candidates.extend(channel_dirs(&Path::new(root).join("World of Warcraft")));
     }
     #[cfg(target_os = "macos")]
-    for root in ["/Applications/World of Warcraft", &home().join("Applications/World of Warcraft").to_string_lossy()] {
-        candidates.push(Path::new(root).join("_classic_beta_"));
+    for root in ["/Applications/World of Warcraft".to_string(),
+                 home().join("Applications/World of Warcraft").to_string_lossy().into_owned()] {
+        candidates.extend(channel_dirs(Path::new(&root)));
     }
     #[cfg(target_os = "linux")]
     {
-        // a Lutris entry that already points at WowB.exe
+        // a Lutris entry that already points at the game binary
         if let Ok(dir) = std::fs::read_dir(home().join(".local/share/lutris/games")) {
             for entry in dir.flatten() {
                 if let Ok(text) = std::fs::read_to_string(entry.path()) {
                     for line in text.lines() {
                         if let Some(exe) = line.trim().strip_prefix("exe:") {
                             let exe = exe.trim().trim_matches(|c| c == '\'' || c == '"');
-                            if exe.to_ascii_lowercase().ends_with("wowb.exe") {
+                            let name = exe.to_ascii_lowercase();
+                            if name.ends_with("wow.exe") || name.ends_with("wowb.exe") {
                                 if let Some(parent) = Path::new(exe).parent() {
                                     candidates.push(parent.to_path_buf());
                                 }
@@ -250,9 +315,10 @@ fn detect_game_dir() -> Option<String> {
                 }
             }
         }
-        for p in ["Games/battlenet/drive_c/Program Files (x86)/World of Warcraft/_classic_beta_",
-                  "Games/World of Warcraft/_classic_beta_"] {
-            candidates.push(home().join(p));
+        for p in ["Games/battlenet/drive_c/Program Files (x86)/World of Warcraft",
+                  "Games/battlenet/drive_c/Program Files/World of Warcraft",
+                  "Games/World of Warcraft"] {
+            candidates.extend(channel_dirs(&home().join(p)));
         }
     }
     candidates.into_iter().find(|p| game_binary(p).exists()).map(|p| p.to_string_lossy().into_owned())

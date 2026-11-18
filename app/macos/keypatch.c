@@ -4,6 +4,10 @@
 // Same logic as app/src-tauri/src/patcher/mod.rs: 12 entries of 40 bytes (u32 id 1..12, 32-byte Ed25519 key,
 // u8 flag, 3 bytes padding) in a heap array; the entry of the region group (8) gets the server's key.
 //
+// Blizzard's keys change with client builds, so the table below is only the fast path. When it no longer matches
+// (the live client since build 1.60.1.70790 ships its own table), the store is found by its structure alone:
+// ids 1..12, the flags, the zero padding and twelve different keys that are not text.
+//
 // Environment: FOREVER_SERVER_KEY (64 hex chars, default: TrinityCore), FOREVER_REGION_GROUP (default 8),
 // FOREVER_PATCH_LOG (log file, default: stderr).
 
@@ -22,6 +26,8 @@
 #define COUNT 12
 #define BLOCK (ENTRY * COUNT)
 #define CHUNK (8 * 1024 * 1024)
+// how often the slower structure-only scan is repeated while no store is found
+#define STRUCTURAL_EVERY 5
 
 static const char *KNOWN_KEYS[COUNT] = {
     "9B0671C815DFF513BFD4A2B26AE1F84EC9106841B2FB620DB65F6ADE7C21AD06",
@@ -45,6 +51,7 @@ enum state { INVALID, ORIGINAL, PATCHED };
 static uint8_t keys[COUNT][32];
 static uint8_t new_key[32];
 static int group = 8;
+static int structural_mode = 0;
 static FILE *log_file;
 static uint8_t *chunk;
 
@@ -78,6 +85,16 @@ static int read_mem(mach_vm_address_t addr, void *buf, mach_vm_size_t len) {
            got == len;
 }
 
+// An Ed25519 public key as it sits in the store: not zero, and not a readable string.
+static int key_shaped(const uint8_t *k) {
+    int nonzero = 0, printable = 0;
+    for (int i = 0; i < 32; i++) {
+        if (k[i]) nonzero = 1;
+        if (k[i] >= 0x20 && k[i] < 0x7f) printable++;
+    }
+    return nonzero && printable <= 8;
+}
+
 static enum state store_state(mach_vm_address_t array) {
     uint8_t raw[BLOCK];
     if (!read_mem(array, raw, BLOCK)) return INVALID;
@@ -93,8 +110,30 @@ static enum state store_state(mach_vm_address_t array) {
     return memcmp(raw + (group - 1) * ENTRY + 4, new_key, 32) == 0 ? PATCHED : ORIGINAL;
 }
 
+// Same store after a client update changed the keys: only the shape of the table is checked.
+static enum state structural_state(mach_vm_address_t array) {
+    uint8_t raw[BLOCK];
+    if (!read_mem(array, raw, BLOCK)) return INVALID;
+    for (int e = 0; e < COUNT; e++) {
+        const uint8_t *o = raw + e * ENTRY;
+        uint32_t id;
+        memcpy(&id, o, 4);
+        if (id != (uint32_t)e + 1) return INVALID;
+        if (o[36] != EXPECTED_FLAGS[e] || o[38] || o[39]) return INVALID;
+        if (!key_shaped(o + 4)) return INVALID;
+        for (int j = 0; j < e; j++) {
+            if (memcmp(o + 4, raw + j * ENTRY + 4, 32) == 0) return INVALID;
+        }
+    }
+    return memcmp(raw + (group - 1) * ENTRY + 4, new_key, 32) == 0 ? PATCHED : ORIGINAL;
+}
+
+static enum state state_of(mach_vm_address_t array) {
+    return structural_mode ? structural_state(array) : store_state(array);
+}
+
 // Read/write regions holding a store. Returns the number found (at most `max` are stored in `out`).
-static int find_stores(mach_vm_address_t *out, int max) {
+static int find_stores_exact(mach_vm_address_t *out, int max) {
     int n = 0;
     mach_vm_address_t addr = 0;
     for (;;) {
@@ -127,16 +166,53 @@ static int find_stores(mach_vm_address_t *out, int max) {
     return n;
 }
 
+// Scans every 4-byte aligned address for entry id 1 and validates the block. Slower, but independent of the keys
+// the client ships.
+static int find_stores_structural(mach_vm_address_t *out, int max) {
+    int n = 0;
+    mach_vm_address_t addr = 0;
+    for (;;) {
+        mach_vm_size_t size = 0;
+        vm_region_basic_info_data_64_t info;
+        mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t obj;
+        if (mach_vm_region(mach_task_self(), &addr, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &cnt,
+                           &obj) != KERN_SUCCESS)
+            break;
+        int rw = (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) == (VM_PROT_READ | VM_PROT_WRITE);
+        int ours = addr <= (mach_vm_address_t)chunk && (mach_vm_address_t)chunk < addr + size;
+        if (rw && !ours) {
+            for (mach_vm_address_t off = addr; off < addr + size;) {
+                mach_vm_size_t take = addr + size - off < CHUNK ? addr + size - off : CHUNK;
+                if (!read_mem(off, chunk, take)) break;
+                for (mach_vm_size_t i = 0; i + 4 <= take; i += 4) {
+                    uint32_t v;
+                    memcpy(&v, chunk + i, 4);
+                    if (v != 1) continue;
+                    mach_vm_address_t hit = off + i;
+                    if (structural_state(hit) != INVALID) {
+                        if (n < max) out[n] = hit;
+                        n++;
+                    }
+                }
+                if (take < CHUNK) break;
+                off += CHUNK - 4;
+            }
+        }
+        addr += size;
+    }
+    return n;
+}
+
 static int patch(mach_vm_address_t array) {
     uint8_t *target = (uint8_t *)array + (group - 1) * ENTRY + 4;
     for (int i = 0; i < 20; i++) {
         uint8_t cur[32];
         if (read_mem((mach_vm_address_t)target, cur, 32)) {
             if (memcmp(cur, new_key, 32) == 0) return 1;
-            if (memcmp(cur, keys[group - 1], 32) == 0) {
-                memcpy(target, new_key, 32);
-                return store_state(array) == PATCHED;
-            }
+            memcpy(target, new_key, 32);
+            uint8_t back[32];
+            if (read_mem((mach_vm_address_t)target, back, 32) && memcmp(back, new_key, 32) == 0) return 1;
         }
         usleep(300 * 1000);
     }
@@ -146,11 +222,12 @@ static int patch(mach_vm_address_t array) {
 static void *watch(void *arg) {
     (void)arg;
     mach_vm_address_t store = 0;
-    int said_waiting = 0;
+    int said_waiting = 0, said_missing = 0, slow = 0;
+    time_t started = time(NULL);
     say("loaded (PID %d, group %d)", getpid(), group);
     for (;;) {
         if (store) {
-            switch (store_state(store)) {
+            switch (state_of(store)) {
             case PATCHED:
                 sleep(2);
                 break;
@@ -170,7 +247,14 @@ static void *watch(void *arg) {
             continue;
         }
         mach_vm_address_t found[4];
-        int n = find_stores(found, 4);
+        // the exact table is cheap to look for; the structure-only scan is the fallback after a client update
+        int n = find_stores_exact(found, 4);
+        structural_mode = 0;
+        if (n == 0 && ++slow >= STRUCTURAL_EVERY * 2) {
+            slow = 0;
+            n = find_stores_structural(found, 4);
+            if (n > 0) structural_mode = 1;
+        }
         if (n == 1) {
             if (patch(found[0])) {
                 say("server key written (group %d) at 0x%llx", group, (unsigned long long)found[0]);
@@ -182,6 +266,10 @@ static void *watch(void *arg) {
             if (!said_waiting) {
                 say("waiting for the key store...");
                 said_waiting = 1;
+            }
+            if (!said_missing && time(NULL) - started > 20) {
+                say("key store not found: this client build may not be supported yet");
+                said_missing = 1;
             }
             usleep(500 * 1000);
         } else {

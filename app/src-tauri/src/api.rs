@@ -3,7 +3,8 @@
 //! The portal host name is resolved to the configured server address here, and only the embedded CA is trusted,
 //! so this works before the hosts file and the system certificate store are set up.
 
-use crate::config::{Server, CA_PEM};
+use crate::ca;
+use crate::config::Server;
 use crate::i18n::{t, tf};
 use base64::Engine;
 use serde::Deserialize;
@@ -52,7 +53,8 @@ fn basic(ticket: &str) -> String {
 impl Api {
     pub async fn new(server: &Server) -> Result<Self> {
         let addr = resolve(&server.address, server.rest_port).await?;
-        let ca = reqwest::Certificate::from_pem(CA_PEM.as_bytes()).map_err(|e| e.to_string())?;
+        // the CA in use: built in, unless the server offered a newer one (see ca::refresh)
+        let ca = reqwest::Certificate::from_pem(ca::pem().as_bytes()).map_err(|e| e.to_string())?;
         let builder = reqwest::Client::builder();
         #[cfg(not(windows))]
         let builder = builder.use_rustls_tls();
@@ -161,6 +163,14 @@ pub async fn news(website: &str) -> Result<Vec<NewsItem>> {
         }
     }
     Ok(items)
+}
+
+/// True when the bnetserver answers over TLS. A raw TCP connect would work too, but the server logs every
+/// aborted handshake as "SSL Handshake failed", so the status check would fill its log with noise.
+pub async fn login_open(server: &Server) -> bool {
+    let Ok(api) = Api::new(server).await else { return false };
+    // any answer (even 400/401) means the port speaks TLS and belongs to the bnetserver
+    api.post("/login/", None, None).await.is_ok()
 }
 
 /// True when something accepts TCP connections on address:port.

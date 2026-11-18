@@ -8,16 +8,35 @@ use std::path::Path;
 use std::process::{Child, Command};
 
 pub const WTF_NAME: &str = "ForeverLauncher.wtf";
+/// The client's own settings file, next to the one it is started with.
+const BASE_WTF: &str = "Config.wtf";
+/// Where the client reads the login ticket. The live client is the Battle.net product `wowf`, the Classic beta was
+/// `WoW`; both are written because each client only reads its own one.
 #[cfg(not(target_os = "macos"))]
-const LAUNCH_OPTIONS: &str = r"Software\Blizzard Entertainment\Battle.net\Launch Options\WoW";
+const LAUNCH_OPTIONS: [&str; 2] = [
+    r"Software\Blizzard Entertainment\Battle.net\Launch Options\WoW",
+    r"Software\Blizzard Entertainment\Battle.net\Launch Options\WoWF",
+];
 
-/// WTF/ForeverLauncher.wtf: a copy of Config.wtf with the portal and the language set.
+/// WTF/Config.wtf and WTF/ForeverLauncher.wtf: the portal and the language, forced before every start.
+///
+/// The client saves its settings when it closes and writes `SET portal "EU"` back, so both files are set again on
+/// every start. The file the client is started with is left read-only: otherwise the next start would talk to
+/// Blizzard instead of this server, which only shows up as "you have been disconnected".
 pub fn write_wtf(settings: &Settings) -> Result<(), String> {
     let dir = Path::new(&settings.game_dir).join("WTF");
     std::fs::create_dir_all(&dir).map_err(|e| tf("wtf_folder", &[&e]))?;
-    let path = dir.join(WTF_NAME);
-    let base = dir.join("Config.wtf");
-    let text = std::fs::read_to_string(&path).or_else(|_| std::fs::read_to_string(&base)).unwrap_or_default();
+    // Config.wtf stays writable (the client saves its video settings there), the -config file is locked
+    write_portal(&dir, settings, BASE_WTF, false)?;
+    write_portal(&dir, settings, WTF_NAME, true)
+}
+
+fn write_portal(dir: &Path, settings: &Settings, name: &str, lock: bool) -> Result<(), String> {
+    let path = dir.join(name);
+    let shown = path.display().to_string();
+    // an earlier start may have left the file read-only
+    set_mode(&path, 0o644);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
     let wanted = [
         ("portal", settings.server.portal.clone()),
         ("textLocale", settings.locale.clone()),
@@ -31,8 +50,27 @@ pub fn write_wtf(settings: &Settings) -> Result<(), String> {
     for (k, v) in wanted {
         lines.push(format!("SET {k} \"{v}\""));
     }
-    std::fs::write(&path, lines.join("\r\n") + "\r\n").map_err(|e| format!("{} : {e}", path.display()))
+    std::fs::write(&path, lines.join("\r\n") + "\r\n").map_err(|e| format!("{shown} : {e}"))?;
+    // read back: a portal that did not make it into the file must not be discovered by the game
+    let back = std::fs::read_to_string(&path).map_err(|e| format!("{shown} : {e}"))?;
+    let want_line = format!("SET portal \"{}\"", settings.server.portal);
+    if !back.lines().any(|l| l.trim() == want_line) {
+        return Err(tf("wtf_not_written", &[&shown]));
+    }
+    if lock {
+        set_mode(&path, 0o444);
+    }
+    Ok(())
 }
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
+}
+
+#[cfg(not(unix))]
+fn set_mode(_: &Path, _: u32) {}
 
 /// Stores the login ticket where the client reads it with -launcherlogin.
 #[cfg(windows)]
@@ -40,22 +78,25 @@ pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, ga
     use windows::core::HSTRING;
     use windows::Win32::System::Registry::*;
     let blob = crate::dpapi::protect(ticket.as_bytes())?;
-    unsafe {
-        let mut key = HKEY::default();
-        RegCreateKeyExW(HKEY_CURRENT_USER, &HSTRING::from(LAUNCH_OPTIONS), 0, None, REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None)
-            .ok()
-            .map_err(|e| tf("registry", &[&e]))?;
-        let set_str = |name: &str, value: &str| {
-            let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-            let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
-            RegSetValueExW(key, &HSTRING::from(name), 0, REG_SZ, Some(bytes)).ok()
-        };
-        let r = set_str("CONNECTION_STRING", portal)
-            .and_then(|_| set_str("GAME_ACCOUNT", game_account))
-            .and_then(|_| RegSetValueExW(key, &HSTRING::from("WEB_TOKEN"), 0, REG_BINARY, Some(&blob)).ok());
-        let _ = RegCloseKey(key);
-        r.map_err(|e| tf("registry", &[&e]))
+    for path in LAUNCH_OPTIONS {
+        unsafe {
+            let mut key = HKEY::default();
+            RegCreateKeyExW(HKEY_CURRENT_USER, &HSTRING::from(path), 0, None, REG_OPTION_NON_VOLATILE, KEY_WRITE, None, &mut key, None)
+                .ok()
+                .map_err(|e| tf("registry", &[&e]))?;
+            let set_str = |name: &str, value: &str| {
+                let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
+                let bytes = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
+                RegSetValueExW(key, &HSTRING::from(name), 0, REG_SZ, Some(bytes)).ok()
+            };
+            let r = set_str("CONNECTION_STRING", portal)
+                .and_then(|_| set_str("GAME_ACCOUNT", game_account))
+                .and_then(|_| RegSetValueExW(key, &HSTRING::from("WEB_TOKEN"), 0, REG_BINARY, Some(&blob)).ok());
+            let _ = RegCloseKey(key);
+            r.map_err(|e| tf("registry", &[&e]))?;
+        }
     }
+    Ok(())
 }
 
 /// Linux: the same values in the prefix registry, through `reg import` (the Wine DPAPI blob is built here).
@@ -64,9 +105,16 @@ pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, gam
     use crate::dpapi::{wine, WEB_TOKEN_ENTROPY};
     let blob = wine::protect(ticket.as_bytes(), wine::PROTON_USER, &WEB_TOKEN_ENTROPY);
     let hexdata: Vec<String> = blob.iter().map(|b| format!("{b:02x}")).collect();
+    let section = |path: &str| {
+        format!(
+            "[HKEY_CURRENT_USER\\{path}]\r\n\"WEB_TOKEN\"=hex:{}\r\n\"GAME_ACCOUNT\"=\"{game_account}\"\r\n\"CONNECTION_STRING\"=\"{portal}\"\r\n",
+            hexdata.join(",")
+        )
+    };
     let content = format!(
-        "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\{LAUNCH_OPTIONS}]\r\n\"WEB_TOKEN\"=hex:{}\r\n\"GAME_ACCOUNT\"=\"{game_account}\"\r\n\"CONNECTION_STRING\"=\"{portal}\"\r\n",
-        hexdata.join(",")
+        "Windows Registry Editor Version 5.00\r\n\r\n{}\r\n{}",
+        section(LAUNCH_OPTIONS[0]),
+        section(LAUNCH_OPTIONS[1])
     );
     // regedit files are UTF-16 LE with a BOM; Wine sees the Linux file system as Z:
     let mut bytes = vec![0xFF, 0xFE];
@@ -89,7 +137,7 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
         .args(["-launcherlogin", "-config", WTF_NAME])
         .current_dir(&settings.game_dir)
         .spawn()
-        .map_err(|e| tf("launch_failed", &[&"WowB.exe", &e]))
+        .map_err(|e| tf("launch_failed", &[&crate::config::LIVE_EXE, &e]))
 }
 
 #[cfg(target_os = "linux")]

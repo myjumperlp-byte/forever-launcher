@@ -33,9 +33,9 @@ jobs:
           - os: windows-latest
             bundles: nsis
             artifact: Forever-Launcher-Windows
-            files: |
-              dist/Legacy-of-Azeroth-Setup-Windows-x64.exe
-              app/src-tauri/target/release/bundle/nsis/*.exe
+            # only the dist/ copy: upload-artifact stores paths relative to their common root, so a second path
+            # would put this file under dist/ inside the artifact and the release glob dist/* would miss it
+            files: dist/Legacy-of-Azeroth-Setup-Windows-x64.exe
           - os: macos-latest
             bundles: dmg
             target: universal-apple-darwin

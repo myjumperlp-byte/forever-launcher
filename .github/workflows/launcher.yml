@@ -31,8 +31,8 @@ jobs:
             bundles: nsis
             artifact: Forever-Launcher-Windows
             files: |
+              dist/Legacy-of-Azeroth-Setup-Windows-x64.exe
               app/src-tauri/target/release/bundle/nsis/*.exe
-              app/src-tauri/target/release/forever-launcher.exe
           - os: macos-latest
             bundles: dmg
             target: universal-apple-darwin
@@ -82,6 +82,14 @@ jobs:
           config=()
           [ -n "$version" ] && config=(--config "{\"version\":\"$version\"}")
           npx --yes @tauri-apps/cli@2 build --bundles ${{ matrix.bundles }} ${{ matrix.target && format('--target {0}', matrix.target) || '' }} "${config[@]}"
+
+      # the download players see carries the launcher's name, not the crate's binary name
+      - name: Name the Windows download
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp app/src-tauri/target/release/forever-launcher.exe dist/Legacy-of-Azeroth-Setup-Windows-x64.exe
 
       - uses: actions/upload-artifact@v4
         with:

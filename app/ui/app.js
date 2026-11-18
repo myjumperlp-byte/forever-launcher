@@ -48,6 +48,15 @@ async function refresh() {
   $('view-play').hidden = !logged;
   $('account').hidden = !logged;
   $('game-field').textContent = `${state.settings.server.name || 'Legacy of Azeroth'} ${state.gameVersion || '1.60.1.70938'}`;
+  // a different build is a hint, not a reason to refuse the start: the realm accepts newer clients
+  const notice = $('build-notice');
+  notice.hidden = !state.buildMismatch;
+  if (state.buildMismatch) {
+    notice.textContent = t('buildMismatch', {
+      installed: state.buildMismatch.installed,
+      expected: state.buildMismatch.expected,
+    });
+  }
   if (logged) {
     $('account-email').textContent = state.email;
     $('avatar').textContent = state.email[0].toUpperCase();

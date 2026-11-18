@@ -46,6 +46,15 @@ struct Snapshot {
     game_found: bool,
     game_version: Option<String>,
     playing: bool,
+    /// The client build and the one the realm runs, when they differ: shown above the Play button, not enforced.
+    build_mismatch: Option<BuildMismatch>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildMismatch {
+    installed: String,
+    expected: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -88,6 +97,10 @@ fn get_state(state: State<AppState>) -> Snapshot {
         locales: config::LOCALES,
         runners: runners(),
         playing: state.playing.load(Ordering::SeqCst),
+        build_mismatch: settings.client_build_mismatch().map(|(installed, expected)| BuildMismatch {
+            installed,
+            expected,
+        }),
         settings,
     }
 }
@@ -219,10 +232,10 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     if !settings.game_found() {
         return Err(t("game_not_found").into());
     }
-    // a client the realm does not know is dropped right after the character login, with nothing but an error code
+    // A different build is only noted, never a refusal: the realm also accepts slightly newer clients
+    // (Realm.AlsoAcceptBuilds), and after an automatic Battle.net update the player cannot go back anyway.
     if let Some((installed, expected)) = settings.client_build_mismatch() {
-        log_line(format!("client: build {installed}, the realm runs {expected}"));
-        return Err(tf("client_build", &[&installed, &expected]));
+        log_line(format!("client: build {installed}, the realm runs {expected} (starting anyway)"));
     }
     let session = Session::load().ok_or(t("login_first"))?;
     emit(app, "step", t("step_connecting"));

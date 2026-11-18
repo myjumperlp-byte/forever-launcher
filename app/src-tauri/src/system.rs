@@ -35,7 +35,7 @@ fn portal_resolves_to(portal: &str) -> Option<IpAddr> {
 pub fn check(settings: &Settings) -> Checks {
     let server = &settings.server;
     let (hosts, hosts_detail) = match (server_ip(server), portal_resolves_to(&server.portal)) {
-        (Ok(want), Some(got)) if want == got => (true, format!("{} → {got}", server.portal)),
+        (Ok(want), Some(got)) if want == got => (true, format!("{}:{} → {got}", server.portal, server.bnet_port)),
         (Ok(want), Some(got)) => (false, tf("hosts_wrong", &[&server.portal, &got, &want])),
         (Ok(_), None) => (false, tf("hosts_missing", &[&server.portal])),
         (Err(e), _) => (false, e),
@@ -345,6 +345,14 @@ mod imp {
             "/usr/share/steam/compatibilitytools.d".into(),
             home().join(".local/share/Steam/steamapps/common"),
             home().join(".steam/steam/steamapps/common"),
+            // Steam from Flathub (Fedora, Bazzite, Steam Deck): everything lives under ~/.var/app
+            home().join(".var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d"),
+            home().join(".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common"),
+            home().join(".var/app/com.valvesoftware.Steam/.steam/root/compatibilitytools.d"),
+            home().join(".var/app/com.valvesoftware.Steam/.steam/root/steamapps/common"),
+            // Debian/Ubuntu and Valve's own packages install into ~/.steam/debian-installation
+            home().join(".steam/debian-installation/compatibilitytools.d"),
+            home().join(".steam/debian-installation/steamapps/common"),
         ];
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
@@ -380,9 +388,30 @@ mod imp {
     }
 
     pub fn which(cmd: &str) -> bool {
-        std::env::var_os("PATH")
-            .map(|paths| std::env::split_paths(&paths).any(|d| d.join(cmd).is_file()))
-            .unwrap_or(false)
+        find_program(cmd).is_some()
+    }
+
+    /// Full path of a program. PATH first, then the folders a desktop session often leaves out: an AppImage
+    /// started from the file manager runs with a PATH that has no `~/.local/bin`, and that is where the
+    /// umu-launcher installer (and its umu-run) puts itself.
+    pub fn find_program(cmd: &str) -> Option<String> {
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                let candidate = dir.join(cmd);
+                if candidate.is_file() {
+                    return Some(candidate.to_string_lossy().into_owned());
+                }
+            }
+        }
+        [
+            home().join(".local/bin").join(cmd),
+            std::path::PathBuf::from("/usr/local/bin").join(cmd),
+            std::path::PathBuf::from("/usr/bin").join(cmd),
+            std::path::PathBuf::from("/bin").join(cmd),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
     }
 
     pub fn default_runner() -> String {
@@ -392,7 +421,7 @@ mod imp {
             (!n.contains("latest"), !n.contains("cachyos"), !(n.contains("ge-proton") || n.contains("proton-ge")))
         };
         match protons.iter().min_by_key(|(n, _)| rank(n)) {
-            Some((_, p)) if which("umu-run") => p.clone(),
+            Some((_, p)) if find_program("umu-run").is_some() => p.clone(),
             _ => "wine".into(),
         }
     }
@@ -443,33 +472,39 @@ mod imp {
         }
         std::fs::create_dir_all(&l.prefix).map_err(|e| tf("prefix_error", &[&l.prefix, &e]))?;
         if l.runner == "wine" || l.runner.is_empty() {
-            if !which("wine") {
-                return Err(t("wine_not_found").into());
-            }
-            return Ok((vec!["wine".into()], env));
+            let wine = find_program("wine").ok_or_else(|| t("wine_not_found").to_string())?;
+            return Ok((vec![wine], env));
         }
-        if !which("umu-run") {
-            return Err(t("umu_not_found").into());
-        }
+        let umu = find_program("umu-run").ok_or_else(|| t("umu_not_found").to_string())?;
         if !Path::new(&l.runner).join("proton").is_file() {
             return Err(tf("proton_not_found", &[&l.runner]));
         }
         env.push(("PROTONPATH".into(), l.runner.clone()));
         env.push(("GAMEID".into(), "umu-default".into()));
         env.push(("STORE".into(), "none".into()));
-        Ok((vec!["umu-run".into()], env))
+        Ok((vec![umu], env))
     }
 
     /// Runs a Windows program (e.g. reg.exe) in the prefix and waits for it.
     pub fn run_in_prefix(settings: &Settings, args: &[&str]) -> Result<(), String> {
-        let (cmd, env) = runner(settings)?;
+        let (cmd, mut env) = runner(settings)?;
+        // these short calls (reg) run in a prefix the game may already use: Proton's default verb
+        // `waitforexitandrun` would wait for that wineserver to exit first, so they use `run` instead
+        env.push(("PROTON_VERB".into(), "run".into()));
         let out = clean_env(&mut Command::new(&cmd[0])).args(&cmd[1..]).args(args).envs(env).output()
             .map_err(|e| format!("{} : {e}", cmd[0]))?;
         if out.status.success() {
             Ok(())
         } else {
             let err = String::from_utf8_lossy(&out.stderr);
-            Err(tf("command_failed", &[&args.first().unwrap_or(&""), &err.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>()]))
+            let last: String = err.chars().rev().take(300).collect::<String>().chars().rev().collect();
+            // umu runs its container through bubblewrap: without unprivileged user namespaces that fails with a
+            // message that says nothing a player could act on
+            let lower = last.to_lowercase();
+            if ["namespace", "bwrap", "pressure-vessel"].iter().any(|m| lower.contains(m)) {
+                return Err(t("umu_namespace").into());
+            }
+            Err(tf("command_failed", &[&args.first().unwrap_or(&""), &last]))
         }
     }
 

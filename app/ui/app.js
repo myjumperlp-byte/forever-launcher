@@ -86,6 +86,7 @@ async function refreshChecks() {
     $('setup-notice').hidden = !blocking;
     $('setup-detail').textContent = [!c.hosts && c.hostsDetail, needsCert && c.certificateDetail]
       .filter(Boolean).join(' · ');
+    layoutUpdateNotice();
     return c;
   } catch (e) {
     log(t('checks', { e }));
@@ -234,6 +235,9 @@ function fillSettings() {
   $('s-address').value = draft.server.address;
   $('s-website').value = draft.server.website;
   $('s-portal').value = draft.server.portal;
+  $('s-bnet-port').value = draft.server.bnetPort;
+  $('s-rest-port').value = draft.server.restPort;
+  $('s-world-port').value = draft.server.worldPort;
   gameDirState();
 }
 
@@ -256,6 +260,12 @@ function openSettings() {
 function closeSettings() {
   $('settings').hidden = true;
   $('scrim').hidden = true;
+}
+
+// a port the field does not hold (empty, 0, nonsense) keeps the value that was saved before
+function port(input, fallback) {
+  const n = Number(input.value);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : fallback;
 }
 
 async function pick(input, title) {
@@ -293,6 +303,9 @@ $('save-settings').addEventListener('click', async () => {
   draft.server.address = $('s-address').value.trim();
   draft.server.website = $('s-website').value.trim();
   draft.server.portal = $('s-portal').value.trim();
+  draft.server.bnetPort = port($('s-bnet-port'), state.settings.server.bnetPort);
+  draft.server.restPort = port($('s-rest-port'), state.settings.server.restPort);
+  draft.server.worldPort = port($('s-world-port'), state.settings.server.worldPort);
   try {
     await invoke('save_settings', { settings: draft });
     closeSettings();
@@ -359,11 +372,33 @@ async function refreshNews() {
   }));
 }
 
+// ------------------------------------------------------------------------------------------------ update
+// asked once per start; the banner links to the release asset for this platform
+function layoutUpdateNotice() {
+  $('update-notice').classList.toggle('pushed', !$('setup-notice').hidden);
+}
+
+async function checkUpdate() {
+  try {
+    const u = await invoke('check_update');
+    if (!u) return;
+    $('update-detail').textContent = t('updateDetail', { latest: u.latest, current: u.current });
+    $('update-download').onclick = () => openLink(u.url);
+    $('update-notice').hidden = false;
+    layoutUpdateNotice();
+  } catch (e) {
+    console.debug('update:', e);
+  }
+}
+
+$('update-dismiss').addEventListener('click', () => ($('update-notice').hidden = true));
+
 // ------------------------------------------------------------------------------------------------ start
 (async () => {
   await refresh();
   refreshStatus();
   refreshNews();
+  checkUpdate();
   if (state.email) refreshChecks();
   setInterval(refreshStatus, 20000);
 })();

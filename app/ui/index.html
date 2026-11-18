@@ -44,6 +44,18 @@
     <button class="btn light" id="setup-fix" data-i18n="setupFix">Set up</button>
   </div>
 
+  <!-- a newer launcher release is published -->
+  <div class="banner update" id="update-notice" hidden>
+    <div>
+      <strong data-i18n="updateTitle">Update available</strong>
+      <p id="update-detail"></p>
+    </div>
+    <div class="row">
+      <button class="btn light" id="update-download" data-i18n="updateDownload">Download</button>
+      <button class="icon-btn" id="update-dismiss" data-i18n-title="close" title="Close" aria-label="Close">✕</button>
+    </div>
+  </div>
+
   <main class="stage">
     <!-- login -->
     <section class="view view-login" id="view-login" hidden>
@@ -134,6 +146,9 @@
         <label><span data-i18n="serverAddress">Server address</span><input id="s-address" type="text" spellcheck="false"></label>
         <label><span data-i18n="website">Website</span><input id="s-website" type="url" placeholder="https://…" spellcheck="false"></label>
         <label><span data-i18n="portal">Portal</span><input id="s-portal" type="text" spellcheck="false"></label>
+        <label><span>Battle.net port</span><input id="s-bnet-port" type="number" min="1" max="65535" inputmode="numeric"></label>
+        <label><span>Login (REST) port</span><input id="s-rest-port" type="number" min="1" max="65535" inputmode="numeric"></label>
+        <label><span>World port</span><input id="s-world-port" type="number" min="1" max="65535" inputmode="numeric"></label>
       </details>
     </div>
     <footer class="drawer-foot">

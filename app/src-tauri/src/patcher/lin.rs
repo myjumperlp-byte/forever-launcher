@@ -70,6 +70,15 @@ impl Memory for ProcessMemory {
     }
 }
 
+/// Both names the client can have under Wine: the live client since build 70790 is `_forever_\Wow.exe`, the Classic
+/// beta it replaced was `_classic_beta_\WowB.exe`. The patcher must not depend on which channel is installed.
+const CLIENT_EXES: [&str; 2] = ["wow.exe", "wowb.exe"];
+
+/// A path whose last component is one of the client executables (`/games/_forever_/Wow.exe`), or the bare name.
+fn client_path(path: &str) -> bool {
+    CLIENT_EXES.iter().any(|name| path == *name || path.ends_with(&format!("/{name}")))
+}
+
 fn is_client(pid: u32) -> bool {
     // Wine sets argv[0] to the .exe path; on drives mounted without exec the .exe is not mapped from the file
     let argv0 = std::fs::read(format!("/proc/{pid}/cmdline"))
@@ -80,15 +89,15 @@ fn is_client(pid: u32) -> bool {
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
         .unwrap_or_default();
-    if (argv0.ends_with("/wowb.exe") || argv0 == "wowb.exe") && exe.starts_with("wine") {
+    if client_path(&argv0) && exe.starts_with("wine") {
         return true;
     }
     std::fs::read_to_string(format!("/proc/{pid}/maps"))
-        .map(|m| m.lines().any(|l| l.trim_end().to_lowercase().ends_with("/wowb.exe")))
+        .map(|m| m.lines().any(|l| client_path(&l.trim_end().to_lowercase())))
         .unwrap_or(false)
 }
 
-/// The game process: the WowB.exe Wine process using the most memory (the launcher stub uses ~30 MB).
+/// The game process: the Wow.exe / WowB.exe Wine process using the most memory (the launcher stub uses ~30 MB).
 pub fn find_client() -> Option<ProcessMemory> {
     let me = std::process::id();
     let mut best: Option<(u64, u32)> = None;

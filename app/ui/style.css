@@ -101,6 +101,10 @@ a:hover { text-decoration: underline; }
 .banner div { flex: 1; min-width: 0; }
 .banner strong { font-size: 15px; }
 .banner p { margin: 2px 0 0; font-size: 12.5px; color: rgba(255, 255, 255, 0.78); }
+/* a published launcher release: gold banner, below the PC setup notice when both are shown */
+.banner.update { background: linear-gradient(90deg, rgba(96, 66, 14, 0.94), rgba(152, 110, 26, 0.9)); border-color: rgba(241, 196, 91, 0.35); }
+.banner.pushed { top: 158px; }
+.banner .row { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
 
 /* ------------------------------------------------------------------ stage */
 .stage { position: fixed; inset: 64px 0 0 0; }

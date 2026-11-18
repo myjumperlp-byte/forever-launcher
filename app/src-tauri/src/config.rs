@@ -112,6 +112,34 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Option<T> {
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
+/// A log file in the launcher's folder (`fresh`: truncated first), or None when it cannot be opened.
+pub fn log_file(name: &str, fresh: bool) -> Option<std::fs::File> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).write(true);
+    if fresh {
+        opts.truncate(true);
+    } else {
+        opts.append(true);
+    }
+    opts.open(dir.join(name)).ok()
+}
+
+/// One line in launcher.log (what was written where and how the start went), so a wrong portal or a failing
+/// umu can be read without a terminal.
+pub fn log_line(message: impl AsRef<str>) {
+    use std::io::Write;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let stamp = format!("{:02}:{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
+    if let Some(mut file) = log_file("launcher.log", false) {
+        let _ = writeln!(file, "{stamp} {}", message.as_ref());
+    }
+}
+
 fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::create_dir_all(path.parent().unwrap())?;
     let tmp = path.with_extension("tmp");
@@ -127,9 +155,35 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
+/// Addresses the builds up to 1.0.0 shipped with: the LAN machine on the old ports.
+const OLD_ADDRESSES: [&str; 2] = ["127.0.0.1", "192.168.178.42"];
+/// bnet, login REST and world port before the playit tunnel (8081 and 8085 are not published any more).
+const OLD_PORTS: (u16, u16, u16) = (1119, 8081, 8085);
+
+/// Replaces exactly those dead values with the ones this build was compiled with, so a settings.json written by
+/// an old launcher does not keep sending players to an address that no longer answers. Anything the player typed
+/// in himself stays untouched. true: something changed.
+fn migrate_server(server: &mut Server) -> bool {
+    let built_in = Server::default();
+    let dead = OLD_ADDRESSES.contains(&server.address.trim())
+        && (server.bnet_port, server.rest_port, server.world_port) == OLD_PORTS;
+    // a launcher built without FOREVER_SERVER_ADDRESS has the same address as its default: nothing to gain
+    if !dead || OLD_ADDRESSES.contains(&built_in.address.as_str()) {
+        return false;
+    }
+    server.address = built_in.address;
+    server.bnet_port = built_in.bnet_port;
+    server.rest_port = built_in.rest_port;
+    server.world_port = built_in.world_port;
+    true
+}
+
 impl Settings {
     pub fn load() -> Self {
         let mut s: Settings = read_json(&config_dir().join("settings.json")).unwrap_or_default();
+        if migrate_server(&mut s.server) {
+            let _ = s.save();
+        }
         if s.game_dir.is_empty() {
             s.game_dir = detect_game_dir().unwrap_or_default();
         }

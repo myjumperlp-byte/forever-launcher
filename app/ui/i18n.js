@@ -77,6 +77,9 @@ const TEXTS = {
     news2: 'Nouveau launcher : connexion automatique, Linux, Windows et Mac',
     news3Tag: 'Bientôt',
     news3: "Le blog du site arrive : les nouveautés s'afficheront ici",
+    updateTitle: 'Mise à jour disponible',
+    updateDetail: 'La version {latest} est disponible — vous utilisez la {current}.',
+    updateDownload: 'Télécharger',
   },
   en: {
     checking: 'Checking the server…',
@@ -150,6 +153,9 @@ const TEXTS = {
     news2: 'New launcher: automatic login, Linux, Windows and Mac',
     news3Tag: 'Coming soon',
     news3: 'The website blog is coming: news will show up here',
+    updateTitle: 'Update available',
+    updateDetail: 'Version {latest} is available — you are on {current}.',
+    updateDownload: 'Download',
   },
   es: {
     checking: 'Comprobando el servidor…',
@@ -223,6 +229,9 @@ const TEXTS = {
     news2: 'Nuevo launcher: inicio de sesión automático, Linux, Windows y Mac',
     news3Tag: 'Próximamente',
     news3: 'Llega el blog del sitio: las novedades aparecerán aquí',
+    updateTitle: 'Actualización disponible',
+    updateDetail: 'La versión {latest} está disponible — tienes la {current}.',
+    updateDownload: 'Descargar',
   },
   pt: {
     checking: 'Verificando o servidor…',
@@ -296,6 +305,9 @@ const TEXTS = {
     news2: 'Novo launcher: login automático, Linux, Windows e Mac',
     news3Tag: 'Em breve',
     news3: 'O blog do site está chegando: as novidades vão aparecer aqui',
+    updateTitle: 'Atualização disponível',
+    updateDetail: 'A versão {latest} está disponível — você está na {current}.',
+    updateDownload: 'Baixar',
   },
 };
 

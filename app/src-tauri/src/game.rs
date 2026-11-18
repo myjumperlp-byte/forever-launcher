@@ -6,6 +6,8 @@ use crate::i18n::tf;
 use std::path::Path;
 #[cfg(not(target_os = "macos"))]
 use std::process::{Child, Command};
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 
 pub const WTF_NAME: &str = "ForeverLauncher.wtf";
 /// The client's own settings file, next to the one it is started with.
@@ -162,10 +164,17 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
         wrapped.extend(cmd);
         cmd = wrapped;
     }
-    crate::system::clean_env(&mut Command::new(&cmd[0]))
-        .args(&cmd[1..])
-        .envs(env)
-        .current_dir(&settings.game_dir)
+    let mut command = Command::new(&cmd[0]);
+    command.args(&cmd[1..]).envs(env).current_dir(&settings.game_dir);
+    // started from the desktop there is no terminal: every message umu or Proton prints would be lost, so the
+    // output of this start goes to game.log next to settings.json (fresh file per start)
+    if let Some(log) = crate::config::log_file("game.log", true) {
+        crate::config::log_line(format!("game: {} (output in game.log)", cmd.join(" ")));
+        if let Ok(also) = log.try_clone() {
+            command.stdout(Stdio::from(also)).stderr(Stdio::from(log));
+        }
+    }
+    crate::system::clean_env(&mut command)
         .spawn()
         .map_err(|e| tf("launch_failed", &[&cmd[0], &e]))
 }

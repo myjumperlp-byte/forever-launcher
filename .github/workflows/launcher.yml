@@ -13,6 +13,9 @@ on:
 env:
   FOREVER_CA_CERT: ${{ vars.FOREVER_CA_CERT }}
   FOREVER_SERVER_ADDRESS: ${{ vars.FOREVER_SERVER_ADDRESS }}
+  FOREVER_BNET_PORT: ${{ vars.FOREVER_BNET_PORT }}
+  FOREVER_REST_PORT: ${{ vars.FOREVER_REST_PORT }}
+  FOREVER_WORLD_PORT: ${{ vars.FOREVER_WORLD_PORT }}
   FOREVER_WEBSITE: ${{ vars.FOREVER_WEBSITE }}
   FOREVER_SERVER_NAME: ${{ vars.FOREVER_SERVER_NAME }}
   VERSION: ${{ inputs.version || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
@@ -50,6 +53,9 @@ jobs:
           fi
           if [ -z "$FOREVER_SERVER_ADDRESS" ]; then
             echo "::warning::FOREVER_SERVER_ADDRESS is not set: the launcher will point to 127.0.0.1"
+          fi
+          if [ -z "$FOREVER_BNET_PORT" ] || [ -z "$FOREVER_REST_PORT" ] || [ -z "$FOREVER_WORLD_PORT" ]; then
+            echo "::warning::FOREVER_BNET_PORT / FOREVER_REST_PORT / FOREVER_WORLD_PORT are not all set: the built-in tunnel ports 48989/48990/48991 are used"
           fi
 
       - name: Linux dependencies

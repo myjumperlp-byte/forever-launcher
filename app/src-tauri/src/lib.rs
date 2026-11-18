@@ -15,6 +15,7 @@ mod relay;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod patcher;
 mod system;
+mod update;
 
 use config::{Session, Settings};
 use i18n::{t, tf};
@@ -61,19 +62,7 @@ fn emit(app: &AppHandle, kind: &'static str, message: impl Into<String>) {
 /// One line in launcher.log (same folder as settings.json): what was written where and how the start went,
 /// so a wrong portal or a missing macOS permission can be read without a terminal.
 fn log_line(message: impl AsRef<str>) {
-    use std::io::Write;
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let stamp = format!("{:02}:{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-    let path = config::config_dir().join("launcher.log");
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{stamp} {}", message.as_ref());
-    }
+    config::log_line(message);
 }
 
 fn runners() -> Vec<(String, String)> {
@@ -164,6 +153,12 @@ async fn server_status(state: State<'_, AppState>) -> Result<Status, String> {
     // the login port is probed over TLS: a bare TCP connect makes the server log an aborted handshake every poll
     let (world, bnet) = tokio::join!(api::port_open(&s.address, s.world_port), api::login_open(&s));
     Ok(Status { online: world, login: bnet })
+}
+
+/// Newest published launcher build, when it is newer than this one.
+#[tauri::command]
+async fn check_update() -> Result<Option<update::UpdateInfo>, String> {
+    update::check().await
 }
 
 #[tauri::command]
@@ -367,7 +362,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, checks, repair, play
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, checks, repair, play, check_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running Forever Launcher");

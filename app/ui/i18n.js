@@ -80,6 +80,10 @@ const TEXTS = {
     updateTitle: 'Mise à jour disponible',
     updateDetail: 'La version {latest} est disponible — vous utilisez la {current}.',
     updateDownload: 'Télécharger',
+    updateNow: 'Mettre à jour',
+    updateInstalling: 'Téléchargement…',
+    updateReady: 'Version {version} installée, redémarrage…',
+    updateFailed: 'Mise à jour impossible ({e}) — page de téléchargement ouverte.',
   },
   en: {
     checking: 'Checking the server…',
@@ -156,6 +160,10 @@ const TEXTS = {
     updateTitle: 'Update available',
     updateDetail: 'Version {latest} is available — you are on {current}.',
     updateDownload: 'Download',
+    updateNow: 'Update now',
+    updateInstalling: 'Downloading…',
+    updateReady: 'Version {version} installed, restarting…',
+    updateFailed: 'Update failed ({e}) — download page opened.',
   },
   es: {
     checking: 'Comprobando el servidor…',
@@ -232,6 +240,10 @@ const TEXTS = {
     updateTitle: 'Actualización disponible',
     updateDetail: 'La versión {latest} está disponible — tienes la {current}.',
     updateDownload: 'Descargar',
+    updateNow: 'Actualizar',
+    updateInstalling: 'Descargando…',
+    updateReady: 'Versión {version} instalada, reiniciando…',
+    updateFailed: 'Actualización fallida ({e}) — página de descarga abierta.',
   },
   pt: {
     checking: 'Verificando o servidor…',
@@ -308,6 +320,10 @@ const TEXTS = {
     updateTitle: 'Atualização disponível',
     updateDetail: 'A versão {latest} está disponível — você está na {current}.',
     updateDownload: 'Baixar',
+    updateNow: 'Atualizar',
+    updateInstalling: 'Baixando…',
+    updateReady: 'Versão {version} instalada, reiniciando…',
+    updateFailed: 'Falha na atualização ({e}) — página de download aberta.',
   },
 };
 

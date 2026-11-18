@@ -118,6 +118,8 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("proton_not_found", ["Proton introuvable : {}", "Proton not found: {}", "Proton no encontrado: {}", "Proton não encontrado: {}"]),
     ("umu_namespace", ["umu ne peut pas démarrer son conteneur : les « user namespaces » non privilégiés sont désactivés sur ce système (sysctl kernel.unprivileged_userns_clone=1, puis relancer)", "umu cannot start its container: unprivileged user namespaces are disabled on this system (sysctl kernel.unprivileged_userns_clone=1, then start again)", "umu no puede iniciar su contenedor: los «user namespaces» sin privilegios están desactivados en este sistema (sysctl kernel.unprivileged_userns_clone=1 y volver a iniciar)", "o umu não consegue iniciar o seu contêiner: os «user namespaces» sem privilégios estão desativados neste sistema (sysctl kernel.unprivileged_userns_clone=1 e iniciar de novo)"]),
     ("command_failed", ["{} a échoué : {}", "{} failed: {}", "{} falló: {}", "{} falhou: {}"]),
+    ("no_update", ["aucune mise à jour disponible", "no update available", "no hay actualización disponible", "nenhuma atualização disponível"]),
+    ("update_bad_file", ["le fichier téléchargé n'est pas un build du launcher", "the downloaded file is not a launcher build", "el archivo descargado no es una compilación del launcher", "o arquivo baixado não é uma compilação do launcher"]),
     // key patcher (journal)
     ("bad_public_key", ["clé publique du serveur invalide", "invalid server public key", "clave pública del servidor no válida", "chave pública do servidor inválida"]),
     ("bad_region_group", ["groupe de région invalide (2-12, sauf 9)", "invalid region group (2-12, except 9)", "grupo de región no válido (2-12, excepto 9)", "grupo de região inválido (2-12, exceto 9)"]),

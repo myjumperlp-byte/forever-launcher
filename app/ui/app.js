@@ -373,7 +373,9 @@ async function refreshNews() {
 }
 
 // ------------------------------------------------------------------------------------------------ update
-// asked once per start; the banner links to the release asset for this platform
+// asked once per start; the banner updates in place, the download page is the fallback
+let updateUrl = '';
+
 function layoutUpdateNotice() {
   $('update-notice').classList.toggle('pushed', !$('setup-notice').hidden);
 }
@@ -382,14 +384,33 @@ async function checkUpdate() {
   try {
     const u = await invoke('check_update');
     if (!u) return;
+    updateUrl = u.url;
     $('update-detail').textContent = t('updateDetail', { latest: u.latest, current: u.current });
-    $('update-download').onclick = () => openLink(u.url);
     $('update-notice').hidden = false;
     layoutUpdateNotice();
   } catch (e) {
     console.debug('update:', e);
   }
 }
+
+// download, then restart: the new build is put in place at the start of the next launch
+$('update-download').addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t('updateInstalling');
+  try {
+    const version = await invoke('install_update');
+    log(t('updateReady', { version }));
+    await invoke('relaunch');
+  } catch (e) {
+    // whatever went wrong, the release page still carries the file for this system
+    toast(t('updateFailed', { e }));
+    openLink(updateUrl);
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+});
 
 $('update-dismiss').addEventListener('click', () => ($('update-notice').hidden = true));
 

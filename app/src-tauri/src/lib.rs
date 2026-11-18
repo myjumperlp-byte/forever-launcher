@@ -161,6 +161,19 @@ async fn check_update() -> Result<Option<update::UpdateInfo>, String> {
     update::check().await
 }
 
+/// Downloads the newest build so that the restart puts it in place. Returns the version.
+#[tauri::command]
+async fn install_update() -> Result<String, String> {
+    update::install().await
+}
+
+/// Starts the launcher again; a just downloaded update is swapped in on the way (one restart, not two).
+#[tauri::command]
+fn relaunch() {
+    update::apply_pending();
+    update::restart();
+}
+
 #[tauri::command]
 async fn news(state: State<'_, AppState>) -> Result<Vec<api::NewsItem>, String> {
     let website = state.settings.lock().unwrap().server.website.clone();
@@ -357,12 +370,15 @@ fn wait_for_client(child_pid: u32) -> Option<patcher::ProcessMemory> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // before the window: a downloaded update is swapped in and the new build takes over
+    update::apply_pending();
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, checks, repair, play, check_update
+            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, checks, repair, play,
+            check_update, install_update, relaunch
         ])
         .run(tauri::generate_context!())
         .expect("error while running Forever Launcher");

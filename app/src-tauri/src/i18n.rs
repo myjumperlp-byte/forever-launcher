@@ -64,6 +64,7 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("relay_bind", ["le port {} est déjà utilisé ({})", "port {} is already in use ({})", "el puerto {} ya está en uso ({})", "a porta {} já está em uso ({})"]),
     // launch errors
     ("already_running", ["le jeu est déjà lancé", "the game is already running", "el juego ya está abierto", "o jogo já está aberto"]),
+    ("linux_only", ["réservé à Linux", "Linux only", "solo Linux", "somente Linux"]),
     ("game_not_found", ["jeu introuvable : choisissez le dossier _forever_ dans les paramètres", "game not found: choose the _forever_ folder in the settings", "juego no encontrado: elige la carpeta _forever_ en los ajustes", "jogo não encontrado: escolha a pasta _forever_ nas configurações"]),
     ("login_first", ["connectez-vous d'abord", "log in first", "inicia sesión primero", "entre na sua conta primeiro"]),
     ("session_expired", ["session expirée : reconnectez-vous", "session expired: log in again", "sesión caducada: vuelve a iniciar sesión", "sessão expirada: entre novamente"]),

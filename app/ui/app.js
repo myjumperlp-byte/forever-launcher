@@ -89,6 +89,7 @@ async function refreshChecks() {
     const c = await invoke('checks');
     showCheck('check-hosts', c.hosts, c.hostsDetail);
     showCheck('check-cert', c.certificate, c.certificateDetail);
+    if (c.wine) showWine(c.wine);
     // on Linux the prefix certificate is installed automatically at launch: only the hosts entry needs the user
     const needsCert = state.platform !== 'linux' && !c.certificate;
     const blocking = !c.hosts || needsCert;
@@ -106,6 +107,17 @@ function showCheck(id, ok, detail) {
   const el = $(id);
   el.dataset.ok = String(ok);
   el.querySelector('p').textContent = detail;
+}
+
+// Linux: Wine sessions an earlier start left behind (a crash leaves winedbg waiting forever), and whether the
+// prefix was made by the runner now selected
+function showWine(w) {
+  let detail;
+  if (!w.prefixExists) detail = t('wineNoPrefix');
+  else if (w.runnerMismatch) detail = t('wineMismatch', { created: w.createdBy });
+  else if (w.processes) detail = t('wineStale', { n: w.processes, mb: w.memoryMb });
+  else detail = t('wineOk', { arch: w.arch || 'win64' });
+  showCheck('check-wine', w.processes === 0 && w.prefixExists && !w.runnerMismatch, detail);
 }
 
 async function repair(btn) {
@@ -194,6 +206,36 @@ $('toggle-log').addEventListener('click', (ev) => {
 });
 $('close-log').addEventListener('click', () => ($('log-box').hidden = true));
 $('repair').addEventListener('click', (ev) => repair(ev.currentTarget));
+
+$('wine-clean').addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    const n = await invoke('cleanup_wine');
+    toast(t('wineCleanDone', { n }));
+    await refreshChecks();
+  } catch (e) {
+    toast(t('failed', { e }));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('wine-reset').addEventListener('click', async (ev) => {
+  const yes = await window.__TAURI__.dialog.confirm(t('wineResetConfirm'), { title: t('wineReset'), kind: 'warning' });
+  if (!yes) return;
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    const p = await invoke('reset_prefix');
+    toast(t('wineResetDone', { p }));
+    await refreshChecks();
+  } catch (e) {
+    toast(t('failed', { e }));
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 listen('game', ({ payload }) => {
   const { kind, message } = payload;

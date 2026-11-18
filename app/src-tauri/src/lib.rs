@@ -215,6 +215,46 @@ async fn repair(state: State<'_, AppState>) -> Result<system::Checks, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Linux: ends the Wine session of the prefix right now. Returns the number of processes that were attached,
+/// so the player sees that something actually happened.
+#[tauri::command]
+fn cleanup_wine(state: State<AppState>) -> Result<usize, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let prefix = state.settings.lock().unwrap().linux.prefix.clone();
+        let (before, kb) = system::wine_processes(&prefix);
+        system::wineserver_kill(&prefix);
+        let (after, _) = system::wine_processes(&prefix);
+        log_line(format!("wine: cleanup, {before} processes ({} MiB) before, {after} after", kb / 1024));
+        Ok(before)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        Err(t("linux_only").into())
+    }
+}
+
+/// Linux: moves the prefix aside (nothing deleted) so the next start creates a fresh one.
+#[tauri::command]
+fn reset_prefix(state: State<AppState>) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if state.playing.load(Ordering::SeqCst) {
+            return Err(t("already_running").into());
+        }
+        let settings = state.settings.lock().unwrap().clone();
+        let backup = system::reset_prefix(&settings)?;
+        log_line(format!("prefix: reset, old prefix kept at {backup}"));
+        Ok(backup)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        Err(t("linux_only").into())
+    }
+}
+
 #[tauri::command]
 async fn play(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     if state.playing.swap(true, Ordering::SeqCst) {
@@ -322,8 +362,20 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
     emit(app, "step", t("step_launching"));
+    #[cfg(target_os = "linux")]
+    {
+        // nothing is playing at this point, so a Wine session still in the prefix is a leftover
+        let prefix = settings.linux.prefix.clone();
+        let (left, kb) = system::wine_processes(&prefix);
+        if left > 0 {
+            log_line(format!("wine: {left} leftover processes ({} MiB) in the prefix, ending them first", kb / 1024));
+            system::wineserver_kill(&prefix);
+        }
+    }
     let patcher = patcher::Patcher::new(&settings.server.public_key, settings.server.region_group)?;
     let mut child = game::spawn(&settings)?;
+    #[cfg(target_os = "linux")]
+    let session = settings.clone();
     let app = app.clone();
     std::thread::spawn(move || {
         // reap the started process (on Linux it is umu-run / gamescope, which may exit early)
@@ -352,12 +404,25 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
             }
             None => emit(&app, "error", t("not_started")),
         }
+        #[cfg(target_os = "linux")]
+        end_session(&session, child_pid);
         app.state::<AppState>().playing.store(false, Ordering::SeqCst);
     });
     Ok(())
 }
 
 use tauri::Manager;
+
+/// Linux: the game is gone. End the process group it was started in and the Wine session of the prefix, so a
+/// closed (or crashed) client leaves nothing behind. Only that group and that prefix - never a pattern kill.
+#[cfg(target_os = "linux")]
+fn end_session(settings: &Settings, pgid: u32) {
+    let group = format!("-{pgid}");
+    let _ = std::process::Command::new("kill").args(["-TERM", &group]).status();
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = std::process::Command::new("kill").args(["-KILL", &group]).status();
+    system::wineserver_kill(&settings.linux.prefix);
+}
 
 #[cfg(not(target_os = "macos"))]
 fn other_pid(m: &patcher::ProcessMemory) -> u32 {
@@ -390,14 +455,25 @@ fn wait_for_client(child_pid: u32) -> Option<patcher::ProcessMemory> {
 pub fn run() {
     // before the window: a downloaded update is swapped in and the new build takes over
     update::apply_pending();
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
             get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, checks, repair, play,
-            check_update, install_update, relaunch
+            check_update, install_update, relaunch, cleanup_wine, reset_prefix
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running Forever Launcher");
+    app.run(|handle, event| {
+        // the window is closing for good: a Wine session the game left behind would stay until the reboot
+        if let tauri::RunEvent::Exit = event {
+            #[cfg(target_os = "linux")]
+            {
+                let prefix = handle.state::<AppState>().settings.lock().unwrap().linux.prefix.clone();
+                system::wineserver_kill(&prefix);
+            }
+            let _ = handle;
+        }
+    });
 }

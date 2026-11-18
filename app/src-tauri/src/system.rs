@@ -688,7 +688,7 @@ mod imp {
         serde_json::from_slice(&std::fs::read(marker_path(prefix)).ok()?).ok()
     }
 
-    fn write_marker(prefix: &str, marker: &PrefixMarker) {
+    pub fn write_marker(prefix: &str, marker: &PrefixMarker) {
         let _ = std::fs::create_dir_all(prefix);
         if let Ok(bytes) = serde_json::to_vec_pretty(marker) {
             let _ = std::fs::write(marker_path(prefix), bytes);

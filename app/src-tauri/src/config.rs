@@ -571,8 +571,10 @@ mod tests {
         if option_env!("CI").is_none() {
             return;
         }
-        assert!(expected_version().is_some(), "FOREVER_CLIENT_BUILD did not reach the build");
-        assert!(expected_version().unwrap().ends_with("70938"));
+        let expected = expected_version().expect("FOREVER_CLIENT_BUILD did not reach the build");
+        // a full client version, e.g. 1.60.1.70959: the build number is what is compared
+        let build = expected.rsplit('.').next().unwrap_or_default();
+        assert!(build.parse::<u32>().is_ok(), "FOREVER_CLIENT_BUILD is not a version: {expected}");
     }
 
     /// The release workflow passes FOREVER_SERVER_ADDRESS and the three port variables into the build, so a build

@@ -172,9 +172,3 @@ pub async fn login_open(server: &Server) -> bool {
     // any answer (even 400/401) means the port speaks TLS and belongs to the bnetserver
     api.post("/login/", None, None).await.is_ok()
 }
-
-/// True when something accepts TCP connections on address:port.
-pub async fn port_open(address: &str, port: u16) -> bool {
-    let Ok(addr) = resolve(address, port).await else { return false };
-    matches!(tokio::time::timeout(Duration::from_secs(3), tokio::net::TcpStream::connect(addr)).await, Ok(Ok(_)))
-}

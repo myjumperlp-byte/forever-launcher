@@ -144,15 +144,15 @@ async fn logout(state: State<'_, AppState>) -> Result<(), String> {
 #[derive(Serialize)]
 struct Status {
     online: bool,
-    login: bool,
 }
 
 #[tauri::command]
 async fn server_status(state: State<'_, AppState>) -> Result<Status, String> {
     let s = state.settings.lock().unwrap().server.clone();
-    // the login port is probed over TLS: a bare TCP connect makes the server log an aborted handshake every poll
-    let (world, bnet) = tokio::join!(api::port_open(&s.address, s.world_port), api::login_open(&s));
-    Ok(Status { online: world, login: bnet })
+    // Only the bnetserver is probed, and over TLS: a bare TCP connect to the world port would take one of the
+    // server's Network.ConnectionsPerIp slots, and a login that just failed leaves its sockets open - the retry
+    // players then make is refused because of the check that was meant to help them.
+    Ok(Status { online: api::login_open(&s).await })
 }
 
 /// Newest published launcher build, when it is newer than this one.
@@ -218,6 +218,11 @@ async fn play(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> 
 async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     if !settings.game_found() {
         return Err(t("game_not_found").into());
+    }
+    // a client the realm does not know is dropped right after the character login, with nothing but an error code
+    if let Some((installed, expected)) = settings.client_build_mismatch() {
+        log_line(format!("client: build {installed}, the realm runs {expected}"));
+        return Err(tf("client_build", &[&installed, &expected]));
     }
     let session = Session::load().ok_or(t("login_first"))?;
     emit(app, "step", t("step_connecting"));

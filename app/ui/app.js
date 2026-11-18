@@ -67,8 +67,8 @@ async function refreshStatus() {
   const pill = $('status');
   try {
     const s = await invoke('server_status');
-    pill.dataset.state = s.online && s.login ? 'online' : s.online || s.login ? 'partial' : 'offline';
-    $('status-text').textContent = t(s.online && s.login ? 'online' : s.online || s.login ? 'starting' : 'offline');
+    pill.dataset.state = s.online ? 'online' : 'offline';
+    $('status-text').textContent = t(s.online ? 'online' : 'offline');
   } catch {
     pill.dataset.state = 'offline';
     $('status-text').textContent = t('unreachable');

@@ -159,27 +159,71 @@ fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
 const OLD_ADDRESSES: [&str; 2] = ["127.0.0.1", "192.168.178.42"];
 /// bnet, login REST and world port before the playit tunnel (8081 and 8085 are not published any more).
 const OLD_PORTS: (u16, u16, u16) = (1119, 8081, 8085);
+/// Realm name 1.0.0 wrote into settings.json (there is no field for it, so it stayed forever).
+const OLD_NAMES: [&str; 1] = ["Forever"];
+/// Website of the LAN machine before the real site was published.
+const OLD_WEBSITE: &str = "http://192.168.178.42:8088";
 
 /// Replaces exactly those dead values with `built_in` (the server this build was compiled with), so a
 /// settings.json written by an old launcher does not keep sending players to an address that no longer answers.
 /// Anything the player typed in himself stays untouched. true: something changed.
 fn migrate_server_to(server: &mut Server, built_in: &Server) -> bool {
-    let dead = OLD_ADDRESSES.contains(&server.address.trim())
-        && (server.bnet_port, server.rest_port, server.world_port) == OLD_PORTS;
     // a launcher built without FOREVER_SERVER_ADDRESS has the same address as its default: nothing to gain
-    if !dead || OLD_ADDRESSES.contains(&built_in.address.as_str()) {
+    if OLD_ADDRESSES.contains(&built_in.address.as_str()) {
         return false;
     }
-    server.address = built_in.address.clone();
-    server.bnet_port = built_in.bnet_port;
-    server.rest_port = built_in.rest_port;
-    server.world_port = built_in.world_port;
-    true
+    let dead_address = OLD_ADDRESSES.contains(&server.address.trim());
+    let old_ports = (server.bnet_port, server.rest_port, server.world_port) == OLD_PORTS;
+    let mut changed = false;
+    // the untouched 1.0.0 file: the LAN address together with the old ports
+    if dead_address && old_ports {
+        server.address = built_in.address.clone();
+        changed = true;
+    }
+    // everything else is decided on its own. The address may already have been corrected by hand while the old
+    // ports, the old realm name and the old website stayed in the file - before 1.3.0 there was no field for them.
+    if !(dead_address || server.address.trim() == built_in.address.trim()) {
+        return changed; // a third-party server stays exactly as its player set it up
+    }
+    if old_ports {
+        server.bnet_port = built_in.bnet_port;
+        server.rest_port = built_in.rest_port;
+        server.world_port = built_in.world_port;
+        changed = true;
+    }
+    if OLD_NAMES.contains(&server.name.trim()) && !OLD_NAMES.contains(&built_in.name.as_str()) {
+        server.name = built_in.name.clone();
+        changed = true;
+    }
+    if (server.website.trim().is_empty() || server.website.trim() == OLD_WEBSITE)
+        && !built_in.website.is_empty()
+        && server.website.trim() != built_in.website.trim()
+    {
+        server.website = built_in.website.clone();
+        changed = true;
+    }
+    changed
 }
 
 /// The migration as it runs on load: to the server compiled into this build.
 fn migrate_server(server: &mut Server) -> bool {
     migrate_server_to(server, &Server::default())
+}
+
+/// Client build the realm runs (FOREVER_CLIENT_BUILD at build time, e.g. 1.60.1.70938), when the build knows it.
+pub fn expected_version() -> Option<&'static str> {
+    option_env!("FOREVER_CLIENT_BUILD").map(str::trim).filter(|v| !v.is_empty())
+}
+
+/// Compares the build number, the last part of the version: 1.60.1.70938 against 1.60.1.70938.
+pub fn build_matches(installed: &str, expected: &str) -> bool {
+    fn number(v: &str) -> Option<u64> {
+        v.trim().rsplit('.').next()?.trim().parse().ok()
+    }
+    match (number(installed), number(expected)) {
+        (Some(a), Some(b)) => a == b,
+        _ => installed.trim() == expected.trim(),
+    }
 }
 
 impl Settings {
@@ -217,6 +261,16 @@ impl Settings {
 
     pub fn game_found(&self) -> bool {
         !self.game_dir.is_empty() && self.exe().exists()
+    }
+
+    /// The installed client build and the one the realm runs, when they are not the same. The server answers a
+    /// build it does not know with a bare "you have been disconnected" right after the character login, so the
+    /// launcher refuses to start one and says why.
+    pub fn client_build_mismatch(&self) -> Option<(String, &'static str)> {
+        let expected = expected_version()?;
+        // without .build.info there is nothing to compare, and a missing file must not block the start
+        let installed = installed_version(Path::new(&self.game_dir))?;
+        (!build_matches(&installed, expected)).then_some((installed, expected))
     }
 }
 
@@ -448,6 +502,77 @@ mod tests {
         let dev = Server { address: "127.0.0.1".into(), ..tunnel() };
         assert!(!migrate_server_to(&mut server, &dev));
         assert_eq!(server.address, "192.168.178.42");
+    }
+
+    /// The file after the player corrected the address by hand: the old ports, the old realm name and the old
+    /// website are still in it, because there was no field for any of them before 1.3.0.
+    fn corrected_by_hand() -> Server {
+        Server {
+            address: "play.legacy-of-azeroth.com".into(),
+            bnet_port: 1119,
+            rest_port: 8081,
+            world_port: 8085,
+            name: "Forever".into(),
+            website: "http://192.168.178.42:8088".into(),
+            ..tunnel()
+        }
+    }
+
+    #[test]
+    fn lifts_the_old_ports_when_only_the_address_was_corrected() {
+        let mut server = corrected_by_hand();
+        assert!(migrate_server_to(&mut server, &tunnel()));
+        assert_eq!((server.bnet_port, server.rest_port, server.world_port), (48989, 48990, 48991));
+        // the address he typed in stays
+        assert_eq!(server.address, "play.legacy-of-azeroth.com");
+    }
+
+    #[test]
+    fn lifts_the_old_realm_name_and_website() {
+        let mut server = corrected_by_hand();
+        migrate_server_to(&mut server, &tunnel());
+        assert_eq!(server.name, "Legacy of Azeroth");
+        assert_eq!(server.website, "https://legacy-of-azeroth.com");
+    }
+
+    #[test]
+    fn keeps_a_third_party_server_as_its_player_set_it_up() {
+        let mut own = Server {
+            address: "wow.example.test".into(),
+            name: "Forever".into(),
+            website: String::new(),
+            ..corrected_by_hand()
+        };
+        assert!(!migrate_server_to(&mut own, &tunnel()));
+        assert_eq!(own.name, "Forever");
+        assert_eq!(own.website, "");
+        assert_eq!((own.bnet_port, own.rest_port, own.world_port), (1119, 8081, 8085));
+    }
+
+    #[test]
+    fn keeps_a_realm_name_the_player_chose() {
+        let mut server = Server { name: "My Realm".into(), ..corrected_by_hand() };
+        migrate_server_to(&mut server, &tunnel());
+        assert_eq!(server.name, "My Realm");
+    }
+
+    #[test]
+    fn compares_the_client_build_number() {
+        assert!(build_matches("1.60.1.70938", "1.60.1.70938"));
+        assert!(build_matches("70938", "1.60.1.70938"));
+        assert!(!build_matches("1.60.1.70450", "1.60.1.70938"));
+        assert!(!build_matches("", "1.60.1.70938"));
+    }
+
+    /// The release workflow passes FOREVER_CLIENT_BUILD as well, otherwise a released launcher cannot tell an
+    /// outdated client from a current one.
+    #[test]
+    fn the_ci_build_knows_the_client_build() {
+        if option_env!("CI").is_none() {
+            return;
+        }
+        assert!(expected_version().is_some(), "FOREVER_CLIENT_BUILD did not reach the build");
+        assert!(expected_version().unwrap().ends_with("70938"));
     }
 
     /// The release workflow passes FOREVER_SERVER_ADDRESS and the three port variables into the build, so a build

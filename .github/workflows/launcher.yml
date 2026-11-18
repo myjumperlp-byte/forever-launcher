@@ -18,6 +18,8 @@ env:
   FOREVER_WORLD_PORT: ${{ vars.FOREVER_WORLD_PORT }}
   FOREVER_WEBSITE: ${{ vars.FOREVER_WEBSITE }}
   FOREVER_SERVER_NAME: ${{ vars.FOREVER_SERVER_NAME }}
+  # the client build the realm runs: the launcher refuses to start another one, which the server drops anyway
+  FOREVER_CLIENT_BUILD: ${{ vars.FOREVER_CLIENT_BUILD }}
   VERSION: ${{ inputs.version || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
 
 jobs:
@@ -56,6 +58,9 @@ jobs:
           fi
           if [ -z "$FOREVER_BNET_PORT" ] || [ -z "$FOREVER_REST_PORT" ] || [ -z "$FOREVER_WORLD_PORT" ]; then
             echo "::warning::FOREVER_BNET_PORT / FOREVER_REST_PORT / FOREVER_WORLD_PORT are not all set: the built-in tunnel ports 48989/48990/48991 are used"
+          fi
+          if [ -z "$FOREVER_CLIENT_BUILD" ]; then
+            echo "::warning::FOREVER_CLIENT_BUILD is not set: the launcher cannot tell an outdated client from a current one"
           fi
 
       - name: Linux dependencies

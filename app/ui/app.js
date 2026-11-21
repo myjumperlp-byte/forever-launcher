@@ -48,14 +48,20 @@ async function refresh() {
   $('view-play').hidden = !logged;
   $('account').hidden = !logged;
   $('game-field').textContent = `${state.settings.server.name || 'Legacy of Azeroth'} ${state.gameVersion || '1.60.1.70938'}`;
-  // a different build is a hint, not a reason to refuse the start: the realm accepts newer clients
-  const notice = $('build-notice');
+  // a different build is a hint, not a reason to refuse the start: the realm still accepts the older client,
+  // but the player should update it, so the notice says how
+  const notice = $('client-notice');
   notice.hidden = !state.buildMismatch;
   if (state.buildMismatch) {
-    notice.textContent = t('buildMismatch', {
-      installed: state.buildMismatch.installed,
-      expected: state.buildMismatch.expected,
-    });
+    const { installed, expected } = state.buildMismatch;
+    $('client-builds').textContent = `${installed} → ${expected}`;
+    $('client-why').textContent = t('clientUpdateWhy', { installed, expected });
+    $('client-steps').replaceChildren(...[1, 2, 3].map((i) => {
+      const li = document.createElement('li');
+      li.textContent = t(`clientUpdateStep${i}`, { expected });
+      return li;
+    }));
+    $('client-help').onclick = () => openLink(state.settings.server.website);
   }
   if (logged) {
     $('account-email').textContent = state.email;

@@ -85,7 +85,17 @@
           </button>
         </div>
         <p class="step" id="step"></p>
-        <p class="step" id="build-notice" hidden></p>
+
+        <!-- the installed client build differs from the one the realm runs: say what to do, step by step -->
+        <section class="client-notice" id="client-notice" hidden>
+          <div class="client-head">
+            <strong data-i18n="clientUpdateTitle">Update your game client</strong>
+            <span class="builds" id="client-builds"></span>
+          </div>
+          <p class="small" id="client-why"></p>
+          <ol class="client-steps" id="client-steps"></ol>
+          <button class="btn small light" id="client-help" data-i18n="clientUpdateHelp">How to update</button>
+        </section>
         <p class="version"><span id="version"></span> · <a href="#" id="toggle-log" data-i18n="journal">Log</a></p>
       </div>
 

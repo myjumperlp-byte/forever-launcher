@@ -14,6 +14,7 @@ mod relay;
 // macOS: no external memory patch (see macos.rs); kept for its tests
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod patcher;
+mod realm;
 mod system;
 mod update;
 
@@ -54,7 +55,7 @@ struct Snapshot {
 #[serde(rename_all = "camelCase")]
 struct BuildMismatch {
     installed: String,
-    expected: &'static str,
+    expected: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -97,10 +98,9 @@ fn get_state(state: State<AppState>) -> Snapshot {
         locales: config::LOCALES,
         runners: runners(),
         playing: state.playing.load(Ordering::SeqCst),
-        build_mismatch: settings.client_build_mismatch().map(|(installed, expected)| BuildMismatch {
-            installed,
-            expected,
-        }),
+        build_mismatch: settings
+            .client_build_mismatch(&realm::accepted())
+            .map(|(installed, expected)| BuildMismatch { installed, expected }),
         settings,
     }
 }
@@ -172,6 +172,13 @@ async fn server_status(state: State<'_, AppState>) -> Result<Status, String> {
 #[tauri::command]
 async fn check_update() -> Result<Option<update::UpdateInfo>, String> {
     update::check().await
+}
+
+/// Reads the client builds the realm accepts (see `realm`), then the UI asks `get_state` again: the banner above
+/// the Play button follows that list, so it does not stay up for a client the realm runs.
+#[tauri::command]
+async fn check_client() -> Vec<String> {
+    realm::refresh().await
 }
 
 /// Downloads the newest build so that the restart puts it in place. Returns the version.
@@ -274,7 +281,7 @@ async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     }
     // A different build is only noted, never a refusal: the realm also accepts slightly newer clients
     // (Realm.AlsoAcceptBuilds), and after an automatic Battle.net update the player cannot go back anyway.
-    if let Some((installed, expected)) = settings.client_build_mismatch() {
+    if let Some((installed, expected)) = settings.client_build_mismatch(&realm::accepted()) {
         log_line(format!("client: build {installed}, the realm runs {expected} (starting anyway)"));
     }
     let session = Session::load().ok_or(t("login_first"))?;
@@ -461,7 +468,7 @@ pub fn run() {
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
             get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, checks, repair, play,
-            check_update, install_update, relaunch, cleanup_wine, reset_prefix
+            check_update, install_update, relaunch, check_client, cleanup_wine, reset_prefix
         ])
         .build(tauri::generate_context!())
         .expect("error while running Forever Launcher");

@@ -38,7 +38,7 @@ struct Asset {
     browser_download_url: String,
 }
 
-fn repo() -> &'static str {
+pub(crate) fn repo() -> &'static str {
     option_env!("FOREVER_UPDATE_REPO")
         .map(str::trim)
         .filter(|r| !r.is_empty())

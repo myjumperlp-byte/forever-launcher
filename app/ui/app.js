@@ -47,7 +47,7 @@ async function refresh() {
   $('view-login').hidden = logged;
   $('view-play').hidden = !logged;
   $('account').hidden = !logged;
-  $('game-field').textContent = `${state.settings.server.name || 'Legacy of Azeroth'} ${state.gameVersion || '1.60.1.70938'}`;
+  $('game-field').textContent = `${state.settings.server.name || 'Legacy of Azeroth'} ${state.gameVersion || '—'}`;
   // a different build is a hint, not a reason to refuse the start: the realm still accepts the older client,
   // but the player should update it, so the notice says how
   const notice = $('client-notice');
@@ -473,6 +473,13 @@ $('update-dismiss').addEventListener('click', () => ($('update-notice').hidden =
 
 // ------------------------------------------------------------------------------------------------ start
 (async () => {
+  // the builds the realm accepts are read from the launcher repository first, so the client notice above the
+  // Play button compares against the build the server really runs and not against the one this build shipped with
+  try {
+    await invoke('check_client');
+  } catch (e) {
+    console.debug('client builds:', e);
+  }
   await refresh();
   refreshStatus();
   refreshNews();
@@ -480,3 +487,8 @@ $('update-dismiss').addEventListener('click', () => ($('update-notice').hidden =
   if (state.email) refreshChecks();
   setInterval(refreshStatus, 20000);
 })();
+
+// Battle.net can update or replace the client while the launcher stays open: read the folder and the build
+// again whenever the window comes back to the front, so an outdated build or a momentarily missing game app
+// is not kept until the next start.
+window.addEventListener('focus', () => refresh().catch((e) => console.debug('refresh:', e)));

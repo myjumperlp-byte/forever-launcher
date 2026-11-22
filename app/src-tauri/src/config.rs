@@ -263,14 +263,17 @@ impl Settings {
         !self.game_dir.is_empty() && self.exe().exists()
     }
 
-    /// The installed client build and the one the realm runs, when they are not the same. The server answers a
-    /// build it does not know with a bare "you have been disconnected" right after the character login, so the
-    /// launcher refuses to start one and says why.
-    pub fn client_build_mismatch(&self) -> Option<(String, &'static str)> {
-        let expected = expected_version()?;
-        // without .build.info there is nothing to compare, and a missing file must not block the start
+    /// The installed client build and the newest one the realm runs, when the installed build is not one of the
+    /// builds the realm accepts (see `realm::accepted`). The server answers a build it does not know with a bare
+    /// "you have been disconnected" right after the character login, so the launcher says which one to update to.
+    pub fn client_build_mismatch(&self, accepted: &[String]) -> Option<(String, String)> {
+        let expected = accepted.first()?;
+        // without .build.info there is nothing to compare, and a missing file must not raise the banner
         let installed = installed_version(Path::new(&self.game_dir))?;
-        (!build_matches(&installed, expected)).then_some((installed, expected))
+        if accepted.iter().any(|build| build_matches(&installed, build)) {
+            return None;
+        }
+        Some((installed, expected.clone()))
     }
 }
 

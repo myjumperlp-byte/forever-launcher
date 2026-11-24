@@ -70,12 +70,27 @@ async function refresh() {
   updatePlayButton();
 }
 
+// what the Play button is waiting for: the folder to choose, or the file that is missing from the chosen one
+function gameDirNotice() {
+  return state.gameExe ? t('gameMissingAt', { path: state.gameExe }) : t('chooseGameDir');
+}
+
+// the message the step line currently shows about the folder, so it can be taken back once the folder is fine
+let gameDirStep = '';
+
 function updatePlayButton() {
   const play = $('play');
   play.disabled = state.playing || !state.gameFound;
   play.classList.toggle('running', state.playing);
   play.textContent = state.playing ? t('inGame') : t('play');
-  if (!state.gameFound && !state.playing) setStep(t('chooseGameDir'), 'err');
+  if (!state.gameFound && !state.playing) {
+    gameDirStep = gameDirNotice();
+    setStep(gameDirStep, 'err');
+  } else if (gameDirStep && $('step').textContent === gameDirStep) {
+    // the folder is fine again (picked, or Battle.net finished updating): the hint must not stay
+    gameDirStep = '';
+    setStep('');
+  }
 }
 
 async function refreshStatus() {
@@ -330,8 +345,11 @@ async function pick(input, title) {
   if (dir) {
     input.value = dir;
     if (input.id === 's-game-dir') {
-      const loc = await invoke('detect_locale', { gameDir: dir });
+      // the install root is not the folder the game starts from: the launcher takes the channel folder inside it
+      input.value = await invoke('resolve_game_dir', { gameDir: dir });
+      const loc = await invoke('detect_locale', { gameDir: input.value });
       if (loc) $('s-locale').value = loc;
+      gameDirState();
     }
   }
 }

@@ -46,6 +46,8 @@ struct Snapshot {
     runners: Vec<(String, String)>,
     game_found: bool,
     game_version: Option<String>,
+    /// The file the launcher starts: what the notice above the Play button names when it is missing.
+    game_exe: Option<String>,
     playing: bool,
     /// The client build and the one the realm runs, when they differ: shown above the Play button, not enforced.
     build_mismatch: Option<BuildMismatch>,
@@ -91,7 +93,8 @@ fn get_state(state: State<AppState>) -> Snapshot {
     let settings = state.settings.lock().unwrap().clone();
     Snapshot {
         game_found: settings.game_found(),
-        game_version: config::installed_version(std::path::Path::new(&settings.game_dir)),
+        game_version: config::installed_version(&settings.resolved_game_dir()),
+        game_exe: (!settings.game_dir.is_empty()).then(|| settings.exe().to_string_lossy().into_owned()),
         email: Session::load().map(|s| s.email),
         platform: if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" },
         version: env!("CARGO_PKG_VERSION"),
@@ -111,6 +114,10 @@ fn save_settings(state: State<AppState>, settings: Settings) -> Result<(), Strin
     if settings.server.portal.is_empty() {
         settings.server = Default::default();
     }
+    // someone who picked the install root: keep the channel folder the game is started from
+    if !settings.game_dir.trim().is_empty() {
+        settings.game_dir = settings.resolved_game_dir().to_string_lossy().into_owned();
+    }
     settings.save().map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap() = settings;
     Ok(())
@@ -125,7 +132,14 @@ fn set_language(language: String) {
 /// Language installed with the client in that folder (to preselect it).
 #[tauri::command]
 fn detect_locale(game_dir: String) -> Option<String> {
-    config::installed_locale(std::path::Path::new(&game_dir))
+    config::installed_locale(&config::game_dir(std::path::Path::new(&game_dir)))
+}
+
+/// The folder the game really starts from: the picked one, or the `_forever_` / `_classic_beta_` folder inside it,
+/// so a player who picks "World of Warcraft" does not keep a folder that holds no Wow.exe.
+#[tauri::command]
+fn resolve_game_dir(game_dir: String) -> String {
+    config::game_dir(std::path::Path::new(&game_dir)).to_string_lossy().into_owned()
 }
 
 #[tauri::command]
@@ -277,7 +291,7 @@ async fn play(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> 
 
 async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     if !settings.game_found() {
-        return Err(t("game_not_found").into());
+        return Err(tf("game_not_found", &[&settings.exe().to_string_lossy()]));
     }
     // A different build is only noted, never a refusal: the realm also accepts slightly newer clients
     // (Realm.AlsoAcceptBuilds), and after an automatic Battle.net update the player cannot go back anyway.
@@ -467,7 +481,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, checks, repair, play,
+            get_state, save_settings, set_language, detect_locale, resolve_game_dir, login, logout, server_status, news, checks, repair, play,
             check_update, install_update, relaunch, check_client, cleanup_wine, reset_prefix
         ])
         .build(tauri::generate_context!())

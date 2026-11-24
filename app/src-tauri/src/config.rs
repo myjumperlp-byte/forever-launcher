@@ -235,6 +235,12 @@ impl Settings {
         if s.game_dir.is_empty() {
             s.game_dir = detect_game_dir().unwrap_or_default();
         }
+        // a player who picked the install root: keep the channel folder that holds the game
+        let channel = game_dir(Path::new(&s.game_dir));
+        if !s.game_dir.is_empty() && channel != Path::new(&s.game_dir) {
+            s.game_dir = channel.to_string_lossy().into_owned();
+            let _ = s.save();
+        }
         if s.locale.is_empty() {
             s.locale = installed_locale(Path::new(&s.game_dir)).unwrap_or_else(|| "enUS".into());
         }
@@ -254,9 +260,14 @@ impl Settings {
         write_private(&config_dir().join("settings.json"), &serde_json::to_vec_pretty(self).unwrap())
     }
 
-    /// Wow.exe / WowB.exe (Windows, Linux/Wine) or the game .app (macOS).
+    /// Wow.exe / WowB.exe (Windows, Linux/Wine) or the game .app (macOS), in the channel folder of the install.
     pub fn exe(&self) -> PathBuf {
-        game_binary(Path::new(&self.game_dir))
+        game_binary(&self.resolved_game_dir())
+    }
+
+    /// `game_dir` with the channel folder resolved (`…\World of Warcraft` → `…\World of Warcraft\_forever_`).
+    pub fn resolved_game_dir(&self) -> PathBuf {
+        game_dir(Path::new(&self.game_dir))
     }
 
     pub fn game_found(&self) -> bool {
@@ -269,7 +280,7 @@ impl Settings {
     pub fn client_build_mismatch(&self, accepted: &[String]) -> Option<(String, String)> {
         let expected = accepted.first()?;
         // without .build.info there is nothing to compare, and a missing file must not raise the banner
-        let installed = installed_version(Path::new(&self.game_dir))?;
+        let installed = installed_version(&self.resolved_game_dir())?;
         if accepted.iter().any(|build| build_matches(&installed, build)) {
             return None;
         }
@@ -397,6 +408,16 @@ fn game_binary(dir: &Path) -> PathBuf {
 /// Both channel folders of an install (`_forever_` first).
 fn channel_dirs(parent: &Path) -> [PathBuf; 2] {
     [parent.join(LIVE_DIR), parent.join(BETA_DIR)]
+}
+
+/// The folder the game is started from: the picked one, or the channel folder inside it. A player who picks the
+/// "World of Warcraft" folder gets `_forever_` (or the old `_classic_beta_`) instead of a folder without Wow.exe.
+pub fn game_dir(dir: &Path) -> PathBuf {
+    // exists(), not is_file(): on macOS the game is an .app folder
+    if game_binary(dir).exists() {
+        return dir.to_path_buf();
+    }
+    channel_dirs(dir).into_iter().find(|p| game_binary(p).exists()).unwrap_or_else(|| dir.to_path_buf())
 }
 
 fn detect_game_dir() -> Option<String> {
@@ -557,6 +578,32 @@ mod tests {
         let mut server = Server { name: "My Realm".into(), ..corrected_by_hand() };
         migrate_server_to(&mut server, &tunnel());
         assert_eq!(server.name, "My Realm");
+    }
+
+    /// A game in `dir`: Wow.exe, or the .app a mac install carries.
+    fn game_in(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        #[cfg(target_os = "macos")]
+        std::fs::create_dir_all(dir.join("World of Warcraft.app")).unwrap();
+        #[cfg(not(target_os = "macos"))]
+        std::fs::write(dir.join(LIVE_EXE), b"MZ").unwrap();
+    }
+
+    #[test]
+    fn takes_the_channel_folder_inside_the_install_root() {
+        let root = std::env::temp_dir().join(format!("forever-launcher-game-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let live = root.join(LIVE_DIR);
+        game_in(&live);
+        std::fs::create_dir_all(root.join("Data")).unwrap();
+        // the install root is not the folder to start from, `_forever_` is
+        assert_eq!(game_dir(&root), live);
+        // a folder that already holds the game is kept as it is
+        assert_eq!(game_dir(&live), live);
+        // nothing found: the picked folder stays, so the message names what the player chose
+        let empty = root.join("Data");
+        assert_eq!(game_dir(&empty), empty);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

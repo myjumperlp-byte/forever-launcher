@@ -2,3 +2,4 @@
 # so a build changed by Battle.net only needs one line here - no launcher release, no rebuild.
 # The first entry is what the banner names; every listed build counts as current.
 1.60.1.70959
+1.60.1.71091

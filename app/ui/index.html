@@ -44,6 +44,18 @@
     <button class="btn light" id="setup-fix" data-i18n="setupFix">Set up</button>
   </div>
 
+  <!-- a newer launcher release is published -->
+  <div class="banner update" id="update-notice" hidden>
+    <div>
+      <strong data-i18n="updateTitle">Update available</strong>
+      <p id="update-detail"></p>
+    </div>
+    <div class="row">
+      <button class="btn light" id="update-download" data-i18n="updateNow">Update now</button>
+      <button class="icon-btn" id="update-dismiss" data-i18n-title="close" title="Close" aria-label="Close">✕</button>
+    </div>
+  </div>
+
   <main class="stage">
     <!-- login -->
     <section class="view view-login" id="view-login" hidden>
@@ -73,6 +85,17 @@
           </button>
         </div>
         <p class="step" id="step"></p>
+
+        <!-- the installed client build differs from the one the realm runs: say what to do, step by step -->
+        <section class="client-notice" id="client-notice" hidden>
+          <div class="client-head">
+            <strong data-i18n="clientUpdateTitle">Update your game client</strong>
+            <span class="builds" id="client-builds"></span>
+          </div>
+          <p class="small" id="client-why"></p>
+          <ol class="client-steps" id="client-steps"></ol>
+          <button class="btn small light" id="client-help" data-i18n="clientUpdateHelp">How to update</button>
+        </section>
         <p class="version"><span id="version"></span> · <a href="#" id="toggle-log" data-i18n="journal">Log</a></p>
       </div>
 
@@ -117,6 +140,11 @@
         <label><span data-i18n="winePrefix">Wine prefix</span>
           <span class="row"><input id="s-prefix" type="text" spellcheck="false"><button class="btn small" id="pick-prefix" data-i18n="browse">Browse</button></span>
         </label>
+        <div class="check" id="check-wine"><span class="ico"></span><div><strong data-i18n="wineCheck">Wine sessions</strong><p class="small"></p></div></div>
+        <div class="row">
+          <button class="btn small" id="wine-clean" data-i18n="wineClean">Clean up</button>
+          <button class="btn small" id="wine-reset" data-i18n="wineReset">New prefix</button>
+        </div>
         <label class="switch"><input id="s-gamescope" type="checkbox"><span>Gamescope</span></label>
         <label><span data-i18n="gamescopeOptions">Gamescope options</span><input id="s-gamescope-args" type="text" placeholder="-W 2560 -H 1440 -f" spellcheck="false"></label>
         <label><span data-i18n="gamescopeKeyboard">Keyboard in gamescope</span><input id="s-keyboard" type="text" placeholder="fr+azerty" spellcheck="false"></label>
@@ -134,6 +162,9 @@
         <label><span data-i18n="serverAddress">Server address</span><input id="s-address" type="text" spellcheck="false"></label>
         <label><span data-i18n="website">Website</span><input id="s-website" type="url" placeholder="https://…" spellcheck="false"></label>
         <label><span data-i18n="portal">Portal</span><input id="s-portal" type="text" spellcheck="false"></label>
+        <label><span>Battle.net port</span><input id="s-bnet-port" type="number" min="1" max="65535" inputmode="numeric"></label>
+        <label><span>Login (REST) port</span><input id="s-rest-port" type="number" min="1" max="65535" inputmode="numeric"></label>
+        <label><span>World port</span><input id="s-world-port" type="number" min="1" max="65535" inputmode="numeric"></label>
       </details>
     </div>
     <footer class="drawer-foot">

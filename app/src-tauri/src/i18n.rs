@@ -64,7 +64,8 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("relay_bind", ["le port {} est déjà utilisé ({})", "port {} is already in use ({})", "el puerto {} ya está en uso ({})", "a porta {} já está em uso ({})"]),
     // launch errors
     ("already_running", ["le jeu est déjà lancé", "the game is already running", "el juego ya está abierto", "o jogo já está aberto"]),
-    ("game_not_found", ["jeu introuvable : choisissez le dossier _forever_ dans les paramètres", "game not found: choose the _forever_ folder in the settings", "juego no encontrado: elige la carpeta _forever_ en los ajustes", "jogo não encontrado: escolha a pasta _forever_ nas configurações"]),
+    ("linux_only", ["réservé à Linux", "Linux only", "solo Linux", "somente Linux"]),
+    ("game_not_found", ["{} introuvable : choisis le dossier qui contient Wow.exe", "{} not found: choose the folder that holds Wow.exe", "{} no encontrado: elige la carpeta que contiene Wow.exe", "{} não encontrado: escolha a pasta que contém o Wow.exe"]),
     ("login_first", ["connectez-vous d'abord", "log in first", "inicia sesión primero", "entre na sua conta primeiro"]),
     ("session_expired", ["session expirée : reconnectez-vous", "session expired: log in again", "sesión caducada: vuelve a iniciar sesión", "sessão expirada: entre novamente"]),
     ("session_save", ["enregistrement de la session : {}", "saving the session: {}", "guardando la sesión: {}", "salvando a sessão: {}"]),
@@ -116,7 +117,10 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("wine_not_found", ["wine est introuvable", "wine not found", "no se encontró wine", "wine não encontrado"]),
     ("umu_not_found", ["umu-run est introuvable (paquet umu-launcher)", "umu-run not found (umu-launcher package)", "no se encontró umu-run (paquete umu-launcher)", "umu-run não encontrado (pacote umu-launcher)"]),
     ("proton_not_found", ["Proton introuvable : {}", "Proton not found: {}", "Proton no encontrado: {}", "Proton não encontrado: {}"]),
+    ("umu_namespace", ["umu ne peut pas démarrer son conteneur : les « user namespaces » non privilégiés sont désactivés sur ce système (sysctl kernel.unprivileged_userns_clone=1, puis relancer)", "umu cannot start its container: unprivileged user namespaces are disabled on this system (sysctl kernel.unprivileged_userns_clone=1, then start again)", "umu no puede iniciar su contenedor: los «user namespaces» sin privilegios están desactivados en este sistema (sysctl kernel.unprivileged_userns_clone=1 y volver a iniciar)", "o umu não consegue iniciar o seu contêiner: os «user namespaces» sem privilégios estão desativados neste sistema (sysctl kernel.unprivileged_userns_clone=1 e iniciar de novo)"]),
     ("command_failed", ["{} a échoué : {}", "{} failed: {}", "{} falló: {}", "{} falhou: {}"]),
+    ("no_update", ["aucune mise à jour disponible", "no update available", "no hay actualización disponible", "nenhuma atualização disponível"]),
+    ("update_bad_file", ["le fichier téléchargé n'est pas un build du launcher", "the downloaded file is not a launcher build", "el archivo descargado no es una compilación del launcher", "o arquivo baixado não é uma compilação do launcher"]),
     // key patcher (journal)
     ("bad_public_key", ["clé publique du serveur invalide", "invalid server public key", "clave pública del servidor no válida", "chave pública do servidor inválida"]),
     ("bad_region_group", ["groupe de région invalide (2-12, sauf 9)", "invalid region group (2-12, except 9)", "grupo de región no válido (2-12, excepto 9)", "grupo de região inválido (2-12, exceto 9)"]),

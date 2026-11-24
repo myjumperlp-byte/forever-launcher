@@ -47,7 +47,22 @@ async function refresh() {
   $('view-login').hidden = logged;
   $('view-play').hidden = !logged;
   $('account').hidden = !logged;
-  $('game-field').textContent = `${state.settings.server.name || 'Legacy of Azeroth'} ${state.gameVersion || '1.60.1.70938'}`;
+  $('game-field').textContent = `${state.settings.server.name || 'Legacy of Azeroth'} ${state.gameVersion || '—'}`;
+  // a different build is a hint, not a reason to refuse the start: the realm still accepts the older client,
+  // but the player should update it, so the notice says how
+  const notice = $('client-notice');
+  notice.hidden = !state.buildMismatch;
+  if (state.buildMismatch) {
+    const { installed, expected } = state.buildMismatch;
+    $('client-builds').textContent = `${installed} → ${expected}`;
+    $('client-why').textContent = t('clientUpdateWhy', { installed, expected });
+    $('client-steps').replaceChildren(...[1, 2, 3].map((i) => {
+      const li = document.createElement('li');
+      li.textContent = t(`clientUpdateStep${i}`, { expected });
+      return li;
+    }));
+    $('client-help').onclick = () => openLink(state.settings.server.website);
+  }
   if (logged) {
     $('account-email').textContent = state.email;
     $('avatar').textContent = state.email[0].toUpperCase();
@@ -55,20 +70,35 @@ async function refresh() {
   updatePlayButton();
 }
 
+// what the Play button is waiting for: the folder to choose, or the file that is missing from the chosen one
+function gameDirNotice() {
+  return state.gameExe ? t('gameMissingAt', { path: state.gameExe }) : t('chooseGameDir');
+}
+
+// the message the step line currently shows about the folder, so it can be taken back once the folder is fine
+let gameDirStep = '';
+
 function updatePlayButton() {
   const play = $('play');
   play.disabled = state.playing || !state.gameFound;
   play.classList.toggle('running', state.playing);
   play.textContent = state.playing ? t('inGame') : t('play');
-  if (!state.gameFound && !state.playing) setStep(t('chooseGameDir'), 'err');
+  if (!state.gameFound && !state.playing) {
+    gameDirStep = gameDirNotice();
+    setStep(gameDirStep, 'err');
+  } else if (gameDirStep && $('step').textContent === gameDirStep) {
+    // the folder is fine again (picked, or Battle.net finished updating): the hint must not stay
+    gameDirStep = '';
+    setStep('');
+  }
 }
 
 async function refreshStatus() {
   const pill = $('status');
   try {
     const s = await invoke('server_status');
-    pill.dataset.state = s.online && s.login ? 'online' : s.online || s.login ? 'partial' : 'offline';
-    $('status-text').textContent = t(s.online && s.login ? 'online' : s.online || s.login ? 'starting' : 'offline');
+    pill.dataset.state = s.online ? 'online' : 'offline';
+    $('status-text').textContent = t(s.online ? 'online' : 'offline');
   } catch {
     pill.dataset.state = 'offline';
     $('status-text').textContent = t('unreachable');
@@ -80,12 +110,14 @@ async function refreshChecks() {
     const c = await invoke('checks');
     showCheck('check-hosts', c.hosts, c.hostsDetail);
     showCheck('check-cert', c.certificate, c.certificateDetail);
+    if (c.wine) showWine(c.wine);
     // on Linux the prefix certificate is installed automatically at launch: only the hosts entry needs the user
     const needsCert = state.platform !== 'linux' && !c.certificate;
     const blocking = !c.hosts || needsCert;
     $('setup-notice').hidden = !blocking;
     $('setup-detail').textContent = [!c.hosts && c.hostsDetail, needsCert && c.certificateDetail]
       .filter(Boolean).join(' · ');
+    layoutUpdateNotice();
     return c;
   } catch (e) {
     log(t('checks', { e }));
@@ -96,6 +128,17 @@ function showCheck(id, ok, detail) {
   const el = $(id);
   el.dataset.ok = String(ok);
   el.querySelector('p').textContent = detail;
+}
+
+// Linux: Wine sessions an earlier start left behind (a crash leaves winedbg waiting forever), and whether the
+// prefix was made by the runner now selected
+function showWine(w) {
+  let detail;
+  if (!w.prefixExists) detail = t('wineNoPrefix');
+  else if (w.runnerMismatch) detail = t('wineMismatch', { created: w.createdBy });
+  else if (w.processes) detail = t('wineStale', { n: w.processes, mb: w.memoryMb });
+  else detail = t('wineOk', { arch: w.arch || 'win64' });
+  showCheck('check-wine', w.processes === 0 && w.prefixExists && !w.runnerMismatch, detail);
 }
 
 async function repair(btn) {
@@ -185,6 +228,36 @@ $('toggle-log').addEventListener('click', (ev) => {
 $('close-log').addEventListener('click', () => ($('log-box').hidden = true));
 $('repair').addEventListener('click', (ev) => repair(ev.currentTarget));
 
+$('wine-clean').addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    const n = await invoke('cleanup_wine');
+    toast(t('wineCleanDone', { n }));
+    await refreshChecks();
+  } catch (e) {
+    toast(t('failed', { e }));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('wine-reset').addEventListener('click', async (ev) => {
+  const yes = await window.__TAURI__.dialog.confirm(t('wineResetConfirm'), { title: t('wineReset'), kind: 'warning' });
+  if (!yes) return;
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    const p = await invoke('reset_prefix');
+    toast(t('wineResetDone', { p }));
+    await refreshChecks();
+  } catch (e) {
+    toast(t('failed', { e }));
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 listen('game', ({ payload }) => {
   const { kind, message } = payload;
   if (kind === 'log') return log(message);
@@ -234,6 +307,9 @@ function fillSettings() {
   $('s-address').value = draft.server.address;
   $('s-website').value = draft.server.website;
   $('s-portal').value = draft.server.portal;
+  $('s-bnet-port').value = draft.server.bnetPort;
+  $('s-rest-port').value = draft.server.restPort;
+  $('s-world-port').value = draft.server.worldPort;
   gameDirState();
 }
 
@@ -258,13 +334,22 @@ function closeSettings() {
   $('scrim').hidden = true;
 }
 
+// a port the field does not hold (empty, 0, nonsense) keeps the value that was saved before
+function port(input, fallback) {
+  const n = Number(input.value);
+  return Number.isInteger(n) && n > 0 && n < 65536 ? n : fallback;
+}
+
 async function pick(input, title) {
   const dir = await window.__TAURI__.dialog.open({ directory: true, title, defaultPath: input.value || undefined });
   if (dir) {
     input.value = dir;
     if (input.id === 's-game-dir') {
-      const loc = await invoke('detect_locale', { gameDir: dir });
+      // the install root is not the folder the game starts from: the launcher takes the channel folder inside it
+      input.value = await invoke('resolve_game_dir', { gameDir: dir });
+      const loc = await invoke('detect_locale', { gameDir: input.value });
       if (loc) $('s-locale').value = loc;
+      gameDirState();
     }
   }
 }
@@ -293,6 +378,9 @@ $('save-settings').addEventListener('click', async () => {
   draft.server.address = $('s-address').value.trim();
   draft.server.website = $('s-website').value.trim();
   draft.server.portal = $('s-portal').value.trim();
+  draft.server.bnetPort = port($('s-bnet-port'), state.settings.server.bnetPort);
+  draft.server.restPort = port($('s-rest-port'), state.settings.server.restPort);
+  draft.server.worldPort = port($('s-world-port'), state.settings.server.worldPort);
   try {
     await invoke('save_settings', { settings: draft });
     closeSettings();
@@ -359,11 +447,66 @@ async function refreshNews() {
   }));
 }
 
+// ------------------------------------------------------------------------------------------------ update
+// asked once per start; the banner updates in place, the download page is the fallback
+let updateUrl = '';
+
+function layoutUpdateNotice() {
+  $('update-notice').classList.toggle('pushed', !$('setup-notice').hidden);
+}
+
+async function checkUpdate() {
+  try {
+    const u = await invoke('check_update');
+    if (!u) return;
+    updateUrl = u.url;
+    $('update-detail').textContent = t('updateDetail', { latest: u.latest, current: u.current });
+    $('update-notice').hidden = false;
+    layoutUpdateNotice();
+  } catch (e) {
+    console.debug('update:', e);
+  }
+}
+
+// download, then restart: the new build is put in place at the start of the next launch
+$('update-download').addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget;
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t('updateInstalling');
+  try {
+    const version = await invoke('install_update');
+    log(t('updateReady', { version }));
+    await invoke('relaunch');
+  } catch (e) {
+    // whatever went wrong, the release page still carries the file for this system
+    toast(t('updateFailed', { e }));
+    openLink(updateUrl);
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+});
+
+$('update-dismiss').addEventListener('click', () => ($('update-notice').hidden = true));
+
 // ------------------------------------------------------------------------------------------------ start
 (async () => {
+  // the builds the realm accepts are read from the launcher repository first, so the client notice above the
+  // Play button compares against the build the server really runs and not against the one this build shipped with
+  try {
+    await invoke('check_client');
+  } catch (e) {
+    console.debug('client builds:', e);
+  }
   await refresh();
   refreshStatus();
   refreshNews();
+  checkUpdate();
   if (state.email) refreshChecks();
   setInterval(refreshStatus, 20000);
 })();
+
+// Battle.net can update or replace the client while the launcher stays open: read the folder and the build
+// again whenever the window comes back to the front, so an outdated build or a momentarily missing game app
+// is not kept until the next start.
+window.addEventListener('focus', () => refresh().catch((e) => console.debug('refresh:', e)));

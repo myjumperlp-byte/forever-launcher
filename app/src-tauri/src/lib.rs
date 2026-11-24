@@ -14,7 +14,9 @@ mod relay;
 // macOS: no external memory patch (see macos.rs); kept for its tests
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod patcher;
+mod realm;
 mod system;
+mod update;
 
 use config::{Session, Settings};
 use i18n::{t, tf};
@@ -44,7 +46,18 @@ struct Snapshot {
     runners: Vec<(String, String)>,
     game_found: bool,
     game_version: Option<String>,
+    /// The file the launcher starts: what the notice above the Play button names when it is missing.
+    game_exe: Option<String>,
     playing: bool,
+    /// The client build and the one the realm runs, when they differ: shown above the Play button, not enforced.
+    build_mismatch: Option<BuildMismatch>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildMismatch {
+    installed: String,
+    expected: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -61,19 +74,7 @@ fn emit(app: &AppHandle, kind: &'static str, message: impl Into<String>) {
 /// One line in launcher.log (same folder as settings.json): what was written where and how the start went,
 /// so a wrong portal or a missing macOS permission can be read without a terminal.
 fn log_line(message: impl AsRef<str>) {
-    use std::io::Write;
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let stamp = format!("{:02}:{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-    let path = config::config_dir().join("launcher.log");
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = writeln!(file, "{stamp} {}", message.as_ref());
-    }
+    config::log_line(message);
 }
 
 fn runners() -> Vec<(String, String)> {
@@ -92,13 +93,17 @@ fn get_state(state: State<AppState>) -> Snapshot {
     let settings = state.settings.lock().unwrap().clone();
     Snapshot {
         game_found: settings.game_found(),
-        game_version: config::installed_version(std::path::Path::new(&settings.game_dir)),
+        game_version: config::installed_version(&settings.resolved_game_dir()),
+        game_exe: (!settings.game_dir.is_empty()).then(|| settings.exe().to_string_lossy().into_owned()),
         email: Session::load().map(|s| s.email),
         platform: if cfg!(windows) { "windows" } else if cfg!(target_os = "macos") { "macos" } else { "linux" },
         version: env!("CARGO_PKG_VERSION"),
         locales: config::LOCALES,
         runners: runners(),
         playing: state.playing.load(Ordering::SeqCst),
+        build_mismatch: settings
+            .client_build_mismatch(&realm::accepted())
+            .map(|(installed, expected)| BuildMismatch { installed, expected }),
         settings,
     }
 }
@@ -108,6 +113,10 @@ fn save_settings(state: State<AppState>, settings: Settings) -> Result<(), Strin
     let mut settings = settings;
     if settings.server.portal.is_empty() {
         settings.server = Default::default();
+    }
+    // someone who picked the install root: keep the channel folder the game is started from
+    if !settings.game_dir.trim().is_empty() {
+        settings.game_dir = settings.resolved_game_dir().to_string_lossy().into_owned();
     }
     settings.save().map_err(|e| e.to_string())?;
     *state.settings.lock().unwrap() = settings;
@@ -123,7 +132,14 @@ fn set_language(language: String) {
 /// Language installed with the client in that folder (to preselect it).
 #[tauri::command]
 fn detect_locale(game_dir: String) -> Option<String> {
-    config::installed_locale(std::path::Path::new(&game_dir))
+    config::installed_locale(&config::game_dir(std::path::Path::new(&game_dir)))
+}
+
+/// The folder the game really starts from: the picked one, or the `_forever_` / `_classic_beta_` folder inside it,
+/// so a player who picks "World of Warcraft" does not keep a folder that holds no Wow.exe.
+#[tauri::command]
+fn resolve_game_dir(game_dir: String) -> String {
+    config::game_dir(std::path::Path::new(&game_dir)).to_string_lossy().into_owned()
 }
 
 #[tauri::command]
@@ -155,15 +171,41 @@ async fn logout(state: State<'_, AppState>) -> Result<(), String> {
 #[derive(Serialize)]
 struct Status {
     online: bool,
-    login: bool,
 }
 
 #[tauri::command]
 async fn server_status(state: State<'_, AppState>) -> Result<Status, String> {
     let s = state.settings.lock().unwrap().server.clone();
-    // the login port is probed over TLS: a bare TCP connect makes the server log an aborted handshake every poll
-    let (world, bnet) = tokio::join!(api::port_open(&s.address, s.world_port), api::login_open(&s));
-    Ok(Status { online: world, login: bnet })
+    // Only the bnetserver is probed, and over TLS: a bare TCP connect to the world port would take one of the
+    // server's Network.ConnectionsPerIp slots, and a login that just failed leaves its sockets open - the retry
+    // players then make is refused because of the check that was meant to help them.
+    Ok(Status { online: api::login_open(&s).await })
+}
+
+/// Newest published launcher build, when it is newer than this one.
+#[tauri::command]
+async fn check_update() -> Result<Option<update::UpdateInfo>, String> {
+    update::check().await
+}
+
+/// Reads the client builds the realm accepts (see `realm`), then the UI asks `get_state` again: the banner above
+/// the Play button follows that list, so it does not stay up for a client the realm runs.
+#[tauri::command]
+async fn check_client() -> Vec<String> {
+    realm::refresh().await
+}
+
+/// Downloads the newest build so that the restart puts it in place. Returns the version.
+#[tauri::command]
+async fn install_update() -> Result<String, String> {
+    update::install().await
+}
+
+/// Starts the launcher again; a just downloaded update is swapped in on the way (one restart, not two).
+#[tauri::command]
+fn relaunch() {
+    update::apply_pending();
+    update::restart();
 }
 
 #[tauri::command]
@@ -194,6 +236,46 @@ async fn repair(state: State<'_, AppState>) -> Result<system::Checks, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Linux: ends the Wine session of the prefix right now. Returns the number of processes that were attached,
+/// so the player sees that something actually happened.
+#[tauri::command]
+fn cleanup_wine(state: State<AppState>) -> Result<usize, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let prefix = state.settings.lock().unwrap().linux.prefix.clone();
+        let (before, kb) = system::wine_processes(&prefix);
+        system::wineserver_kill(&prefix);
+        let (after, _) = system::wine_processes(&prefix);
+        log_line(format!("wine: cleanup, {before} processes ({} MiB) before, {after} after", kb / 1024));
+        Ok(before)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        Err(t("linux_only").into())
+    }
+}
+
+/// Linux: moves the prefix aside (nothing deleted) so the next start creates a fresh one.
+#[tauri::command]
+fn reset_prefix(state: State<AppState>) -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if state.playing.load(Ordering::SeqCst) {
+            return Err(t("already_running").into());
+        }
+        let settings = state.settings.lock().unwrap().clone();
+        let backup = system::reset_prefix(&settings)?;
+        log_line(format!("prefix: reset, old prefix kept at {backup}"));
+        Ok(backup)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        Err(t("linux_only").into())
+    }
+}
+
 #[tauri::command]
 async fn play(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     if state.playing.swap(true, Ordering::SeqCst) {
@@ -209,7 +291,12 @@ async fn play(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> 
 
 async fn start(app: &AppHandle, settings: Settings) -> Result<(), String> {
     if !settings.game_found() {
-        return Err(t("game_not_found").into());
+        return Err(tf("game_not_found", &[&settings.exe().to_string_lossy()]));
+    }
+    // A different build is only noted, never a refusal: the realm also accepts slightly newer clients
+    // (Realm.AlsoAcceptBuilds), and after an automatic Battle.net update the player cannot go back anyway.
+    if let Some((installed, expected)) = settings.client_build_mismatch(&realm::accepted()) {
+        log_line(format!("client: build {installed}, the realm runs {expected} (starting anyway)"));
     }
     let session = Session::load().ok_or(t("login_first"))?;
     emit(app, "step", t("step_connecting"));
@@ -296,8 +383,20 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
 #[cfg(not(target_os = "macos"))]
 async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
     emit(app, "step", t("step_launching"));
+    #[cfg(target_os = "linux")]
+    {
+        // nothing is playing at this point, so a Wine session still in the prefix is a leftover
+        let prefix = settings.linux.prefix.clone();
+        let (left, kb) = system::wine_processes(&prefix);
+        if left > 0 {
+            log_line(format!("wine: {left} leftover processes ({} MiB) in the prefix, ending them first", kb / 1024));
+            system::wineserver_kill(&prefix);
+        }
+    }
     let patcher = patcher::Patcher::new(&settings.server.public_key, settings.server.region_group)?;
     let mut child = game::spawn(&settings)?;
+    #[cfg(target_os = "linux")]
+    let session = settings.clone();
     let app = app.clone();
     std::thread::spawn(move || {
         // reap the started process (on Linux it is umu-run / gamescope, which may exit early)
@@ -326,12 +425,25 @@ async fn launch(app: &AppHandle, settings: Settings) -> Result<(), String> {
             }
             None => emit(&app, "error", t("not_started")),
         }
+        #[cfg(target_os = "linux")]
+        end_session(&session, child_pid);
         app.state::<AppState>().playing.store(false, Ordering::SeqCst);
     });
     Ok(())
 }
 
 use tauri::Manager;
+
+/// Linux: the game is gone. End the process group it was started in and the Wine session of the prefix, so a
+/// closed (or crashed) client leaves nothing behind. Only that group and that prefix - never a pattern kill.
+#[cfg(target_os = "linux")]
+fn end_session(settings: &Settings, pgid: u32) {
+    let group = format!("-{pgid}");
+    let _ = std::process::Command::new("kill").args(["-TERM", &group]).status();
+    std::thread::sleep(Duration::from_millis(500));
+    let _ = std::process::Command::new("kill").args(["-KILL", &group]).status();
+    system::wineserver_kill(&settings.linux.prefix);
+}
 
 #[cfg(not(target_os = "macos"))]
 fn other_pid(m: &patcher::ProcessMemory) -> u32 {
@@ -362,13 +474,27 @@ fn wait_for_client(child_pid: u32) -> Option<patcher::ProcessMemory> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    // before the window: a downloaded update is swapped in and the new build takes over
+    update::apply_pending();
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(AppState { settings: Mutex::new(Settings::load()), playing: AtomicBool::new(false) })
         .invoke_handler(tauri::generate_handler![
-            get_state, save_settings, set_language, detect_locale, login, logout, server_status, news, checks, repair, play
+            get_state, save_settings, set_language, detect_locale, resolve_game_dir, login, logout, server_status, news, checks, repair, play,
+            check_update, install_update, relaunch, check_client, cleanup_wine, reset_prefix
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running Forever Launcher");
+    app.run(|handle, event| {
+        // the window is closing for good: a Wine session the game left behind would stay until the reboot
+        if let tauri::RunEvent::Exit = event {
+            #[cfg(target_os = "linux")]
+            {
+                let prefix = handle.state::<AppState>().settings.lock().unwrap().linux.prefix.clone();
+                system::wineserver_kill(&prefix);
+            }
+            let _ = handle;
+        }
+    });
 }

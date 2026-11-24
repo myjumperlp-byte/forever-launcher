@@ -6,6 +6,8 @@ use crate::i18n::tf;
 use std::path::Path;
 #[cfg(not(target_os = "macos"))]
 use std::process::{Child, Command};
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
 
 pub const WTF_NAME: &str = "ForeverLauncher.wtf";
 /// The client's own settings file, next to the one it is started with.
@@ -99,9 +101,10 @@ pub fn write_launch_options(_settings: &Settings, portal: &str, ticket: &str, ga
     Ok(())
 }
 
-/// Linux: the same values in the prefix registry, through `reg import` (the Wine DPAPI blob is built here).
+/// The registry file body: the launch options of both products, and Wine's crash dialog switched off. A crashed
+/// client then exits instead of leaving a winedbg process that waits for a click it will never get.
 #[cfg(target_os = "linux")]
-pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, game_account: &str) -> Result<(), String> {
+fn launch_options_reg(portal: &str, ticket: &str, game_account: &str) -> Vec<u8> {
     use crate::dpapi::{wine, WEB_TOKEN_ENTROPY};
     let blob = wine::protect(ticket.as_bytes(), wine::PROTON_USER, &WEB_TOKEN_ENTROPY);
     let hexdata: Vec<String> = blob.iter().map(|b| format!("{b:02x}")).collect();
@@ -111,8 +114,10 @@ pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, gam
             hexdata.join(",")
         )
     };
+    // Wine's crash dialog is switched off in the same file: a crashed client must exit, not leave a winedbg
+    // waiting for a click it will never get - that is what filled players' memory
     let content = format!(
-        "Windows Registry Editor Version 5.00\r\n\r\n{}\r\n{}",
+        "Windows Registry Editor Version 5.00\r\n\r\n{}\r\n{}\r\n[HKEY_CURRENT_USER\\Software\\Wine\\WineDbg]\r\n\"ShowCrashDialog\"=dword:00000000\r\n",
         section(LAUNCH_OPTIONS[0]),
         section(LAUNCH_OPTIONS[1])
     );
@@ -121,6 +126,20 @@ pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, gam
     for u in content.encode_utf16() {
         bytes.extend(u.to_le_bytes());
     }
+    bytes
+}
+
+/// Linux: the same values in the prefix registry, through `reg import` (the Wine DPAPI blob is built here).
+#[cfg(target_os = "linux")]
+pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, game_account: &str) -> Result<(), String> {
+    let bytes = launch_options_reg(portal, ticket, game_account);
+    // the same ticket as last time needs no second Wine session: its own start is expensive enough
+    use sha1::{Digest, Sha1};
+    let digest = hex::encode(Sha1::digest(&bytes));
+    let stamp = crate::config::config_dir().join("launch-options.sha1");
+    if std::fs::read_to_string(&stamp).map(|s| s.trim() == digest.as_str()).unwrap_or(false) {
+        return Ok(());
+    }
     let dir = crate::config::config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let file = dir.join("launch-options.reg");
@@ -128,6 +147,9 @@ pub fn write_launch_options(settings: &Settings, portal: &str, ticket: &str, gam
     let wine_path = format!("Z:{}", file.to_string_lossy().replace('/', "\\"));
     let res = crate::system::run_in_prefix(settings, &["reg", "import", &wine_path]);
     let _ = std::fs::remove_file(&file);
+    if res.is_ok() {
+        let _ = std::fs::write(&stamp, digest);
+    }
     res
 }
 
@@ -142,7 +164,13 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
 
 #[cfg(target_os = "linux")]
 pub fn spawn(settings: &Settings) -> Result<Child, String> {
+    // the folder exists and is marked with the runner that creates it, before Wine is asked to look at it
+    crate::system::prepare_prefix(settings)?;
     let (runner, mut env) = crate::system::runner(settings)?;
+    // no debug output (it costs memory and floods game.log), and a 64-bit prefix when one is created now;
+    // Wine's crash dialog is switched off with the launch options
+    env.push(("WINEDEBUG".into(), "-all".into()));
+    env.push(("WINEARCH".into(), "win64".into()));
     let mut cmd: Vec<String> = runner;
     cmd.push(settings.exe().to_string_lossy().into_owned());
     cmd.extend(["-launcherlogin", "-config", WTF_NAME].map(String::from));
@@ -162,10 +190,50 @@ pub fn spawn(settings: &Settings) -> Result<Child, String> {
         wrapped.extend(cmd);
         cmd = wrapped;
     }
-    crate::system::clean_env(&mut Command::new(&cmd[0]))
-        .args(&cmd[1..])
-        .envs(env)
-        .current_dir(&settings.game_dir)
+    let mut command = Command::new(&cmd[0]);
+    command.args(&cmd[1..]).envs(env).current_dir(&settings.game_dir);
+    // its own process group: when the game ends or crashes, the whole Wine tree goes with it instead of leaving
+    // a wineserver, conhost.exe and winedbg behind (see end_session in lib.rs)
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    // started from the desktop there is no terminal: every message umu or Proton prints would be lost, so the
+    // output of this start goes to game.log next to settings.json (fresh file per start)
+    if let Some(log) = crate::config::log_file("game.log", true) {
+        crate::config::log_line(format!("game: {} (output in game.log)", cmd.join(" ")));
+        if let Ok(also) = log.try_clone() {
+            command.stdout(Stdio::from(also)).stderr(Stdio::from(log));
+        }
+    }
+    crate::system::clean_env(&mut command)
         .spawn()
         .map_err(|e| tf("launch_failed", &[&cmd[0], &e]))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// UTF-16 LE with the regedit BOM back to text.
+    fn decode(bytes: &[u8]) -> String {
+        let units: Vec<u16> = bytes[2..]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    }
+
+    #[test]
+    fn launch_options_reg_has_both_products_and_no_crash_dialog() {
+        let bytes = launch_options_reg("trinity.actual.battle.net:48989", "ticket", "WoW1");
+        let text = decode(&bytes);
+        assert!(text.starts_with("Windows Registry Editor Version 5.00"));
+        assert!(text.contains(r"Launch Options\WoW"));
+        assert!(text.contains(r"Launch Options\WoWF"));
+        assert!(text.contains("CONNECTION_STRING\"=\"trinity.actual.battle.net:48989\""));
+        assert!(text.contains("GAME_ACCOUNT\"=\"WoW1\""));
+        // a crashed client must exit instead of waiting in a winedbg dialog
+        assert!(text.contains("ShowCrashDialog\"=dword:00000000"));
+    }
 }

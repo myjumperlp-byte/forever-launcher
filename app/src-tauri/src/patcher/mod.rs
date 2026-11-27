@@ -45,8 +45,13 @@ const ENTRY: usize = 40;
 const COUNT: usize = 12;
 const BLOCK: usize = ENTRY * COUNT;
 const CHUNK: usize = 8 * 1024 * 1024;
-/// How often the slower structure-only scan is repeated while no store is found.
-const STRUCTURAL_EVERY: Duration = Duration::from_secs(5);
+/// Pause between two heap passes while no store is known, and the slower one after `IDLE_AFTER`: a client whose
+/// table is never recognised must not keep a core busy for the whole session. A pass is short next to the world
+/// server's wait before `SMSG_ENTER_ENCRYPTED_MODE` (`Network.EnterEncryptedModeDelay`), so the store is still
+/// found in time.
+const SCAN_PAUSE: Duration = Duration::from_millis(250);
+const SCAN_PAUSE_IDLE: Duration = Duration::from_secs(2);
+const IDLE_AFTER: Duration = Duration::from_secs(60);
 
 /// Access to another process's memory.
 pub trait Memory {
@@ -85,6 +90,17 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
 /// An Ed25519 public key as it sits in the store: not zero, and not a readable string.
 fn key_shaped(key: &[u8]) -> bool {
     key.iter().any(|b| *b != 0) && key.iter().filter(|b| b.is_ascii_graphic()).count() <= 8
+}
+
+/// Cheap test on a candidate block: entry 1 at its start, entry 2 behind it, the flag, the padding and a key that is
+/// not text. A heap pass has millions of 4-byte aligned `1`s and only a handful of these, so the full check that
+/// follows stays cheap.
+fn looks_like_store_start(block: &[u8]) -> bool {
+    block[..4] == [1, 0, 0, 0]
+        && block[ENTRY..ENTRY + 4] == [2, 0, 0, 0]
+        && block[36] == EXPECTED_FLAGS[0]
+        && block[38..40] == [0, 0]
+        && key_shaped(&block[4..36])
 }
 
 impl Patcher {
@@ -142,10 +158,14 @@ impl Patcher {
         if raw[t..t + 32] == self.new_key { State::Patched } else { State::Original }
     }
 
-    fn find_stores_exact(&self, mem: &dyn Memory) -> Vec<(u64, State)> {
+    /// One pass over the client's heap. Stores are recognised by the shipped table first; only when `structural` is
+    /// set (the previous pass found none that way) are the structure-only candidates of the same pass validated, so
+    /// the heap is read once either way. The second value says the stores were recognised by structure alone.
+    fn scan(&self, mem: &dyn Memory, structural: bool) -> (Vec<(u64, State)>, bool) {
         let needle = &self.keys[0];
         let finder = memmem::Finder::new(needle);
-        let mut found = Vec::new();
+        let mut exact = Vec::new();
+        let mut candidates = Vec::new();
         for (lo, hi) in mem.regions() {
             let mut off = lo;
             while off < hi {
@@ -154,61 +174,43 @@ impl Patcher {
                 for i in finder.find_iter(&buf) {
                     let hit = off + i as u64;
                     if hit % 4 == 0 && hit >= 4 {
-                        let st = self.exact_state(mem, hit - 4);
-                        if st != State::Invalid {
-                            found.push((hit - 4, st));
+                        let state = self.exact_state(mem, hit - 4);
+                        if state != State::Invalid {
+                            exact.push((hit - 4, state));
                         }
+                    }
+                }
+                if structural && exact.is_empty() {
+                    let mut i = 0;
+                    while i + BLOCK <= buf.len() {
+                        if looks_like_store_start(&buf[i..i + BLOCK]) {
+                            candidates.push(off + i as u64);
+                        }
+                        i += 4;
                     }
                 }
                 if take < CHUNK {
                     break;
                 }
-                off += (CHUNK - needle.len()) as u64;
+                // a store can straddle two chunks
+                off += (CHUNK - BLOCK) as u64;
             }
         }
-        found.sort_by_key(|f| f.0);
-        found.dedup_by_key(|f| f.0);
-        found
-    }
-
-    /// Scans every 4-byte aligned address for entry id 1 and validates the block. Slower, but independent of the
-    /// keys the client ships.
-    fn find_stores_structural(&self, mem: &dyn Memory) -> Vec<(u64, State)> {
-        let mut found = Vec::new();
-        for (lo, hi) in mem.regions() {
-            let mut off = lo;
-            while off < hi {
-                let take = CHUNK.min((hi - off) as usize);
-                let Some(buf) = mem.read(off, take) else { break };
-                let mut i = 0usize;
-                while i + 4 <= buf.len() {
-                    if u32::from_le_bytes(buf[i..i + 4].try_into().unwrap()) == 1 {
-                        let hit = off + i as u64;
-                        let st = self.structural_state(mem, hit);
-                        if st != State::Invalid {
-                            found.push((hit, st));
-                        }
-                    }
-                    i += 4;
-                }
-                if take < CHUNK {
-                    break;
-                }
-                off += (CHUNK - 4) as u64;
-            }
-        }
-        found.sort_by_key(|f| f.0);
-        found.dedup_by_key(|f| f.0);
-        found
-    }
-
-    /// (stores, recognised by structure only)
-    fn find_stores(&self, mem: &dyn Memory) -> (Vec<(u64, State)>, bool) {
-        let exact = self.find_stores_exact(mem);
+        exact.sort_by_key(|f| f.0);
+        exact.dedup_by_key(|f| f.0);
         if !exact.is_empty() {
             return (exact, false);
         }
-        (self.find_stores_structural(mem), true)
+        let mut stores: Vec<(u64, State)> = candidates
+            .into_iter()
+            .filter_map(|array| match self.structural_state(mem, array) {
+                State::Invalid => None,
+                state => Some((array, state)),
+            })
+            .collect();
+        stores.sort_by_key(|f| f.0);
+        stores.dedup_by_key(|f| f.0);
+        (stores, true)
     }
 
     fn patch(&self, mem: &dyn Memory, array: u64) -> Result<(), String> {
@@ -233,6 +235,30 @@ impl Patcher {
         Err(t("memory_changed").into())
     }
 
+    /// Patches every store that still holds a Blizzard key and returns the one to watch from now on. The client can
+    /// keep more than one array (a second copy of the table, or a second install in the same process); every one of
+    /// them passed the table check, so writing all of them is safe and beats leaving the client without the key.
+    fn patch_all(&self, mem: &dyn Memory, stores: &[(u64, State)]) -> Result<u64, String> {
+        let mut watched = None;
+        let mut failure = None;
+        for (array, state) in stores {
+            if *state == State::Patched {
+                watched.get_or_insert(*array);
+                continue;
+            }
+            match self.patch(mem, *array) {
+                Ok(()) => {
+                    watched.get_or_insert(*array);
+                }
+                Err(e) => failure = Some(e),
+            }
+        }
+        match watched {
+            Some(array) => Ok(array),
+            None => Err(failure.unwrap_or_else(|| t("memory_changed").into())),
+        }
+    }
+
     /// Watches the client until it closes. `switch` may return a better process (Linux: the Wine launcher process
     /// is found before the real game process).
     pub fn watch(&self, mut mem: Box<dyn Memory>, mut switch: impl FnMut(&dyn Memory) -> Option<Box<dyn Memory>>,
@@ -240,10 +266,11 @@ impl Patcher {
         // (store, recognised by structure only)
         let mut store: Option<(u64, bool)> = None;
         let mut last_switch = Instant::now();
-        let mut last_structural = Instant::now() - STRUCTURAL_EVERY;
-        let mut started = Instant::now();
+        let started = Instant::now();
         let mut said_waiting = false;
         let mut said_missing = false;
+        // set once a pass found no store by the shipped table: the next passes check the structure too
+        let mut structural = false;
         loop {
             if !mem.alive() {
                 if let Some(other) = switch(mem.as_ref()) {
@@ -281,45 +308,135 @@ impl Patcher {
                     mem = other;
                 }
             }
-            // the exact table is cheap to look for; the structure-only scan is the fallback after a client update
-            let (stores, structural) = if last_structural.elapsed() >= STRUCTURAL_EVERY {
-                last_structural = Instant::now();
-                self.find_stores(mem.as_ref())
-            } else {
-                (self.find_stores_exact(mem.as_ref()), false)
-            };
-            match stores.as_slice() {
-                [(array, st)] => {
-                    let res = if *st == State::Patched { Ok(()) } else { self.patch(mem.as_ref(), *array) };
-                    match res {
-                        Ok(()) => {
-                            emit(Event::Log(tf("key_written", &[&self.group])));
-                            emit(Event::Ready);
-                            store = Some((*array, structural));
-                        }
-                        Err(e) => emit(Event::Log(tf("key_write_retry", &[&e]))),
-                    }
+            let (stores, by_structure) = self.scan(mem.as_ref(), structural);
+            if stores.is_empty() {
+                structural = true;
+                if !said_waiting {
+                    emit(Event::Log(t("waiting_realm").into()));
+                    said_waiting = true;
                 }
-                [] => {
-                    if !said_waiting {
-                        emit(Event::Log(t("waiting_realm").into()));
-                        said_waiting = true;
-                    }
-                    if !said_missing && started.elapsed() > Duration::from_secs(20) {
-                        emit(Event::Log(t("key_store_missing").into()));
-                        said_missing = true;
-                    }
-                    std::thread::sleep(Duration::from_millis(150));
+                if !said_missing && started.elapsed() > Duration::from_secs(3) {
+                    emit(Event::Log(t("key_store_missing").into()));
+                    said_missing = true;
                 }
-                many => {
-                    emit(Event::Log(tf("many_key_stores", &[&many.len()])));
-                    std::thread::sleep(Duration::from_millis(500));
-                }
+                std::thread::sleep(if started.elapsed() > IDLE_AFTER { SCAN_PAUSE_IDLE } else { SCAN_PAUSE });
+                continue;
             }
-            // keep the start time of the missing notice meaningful even if the game takes long to boot
-            if started.elapsed() > Duration::from_secs(600) {
-                started = Instant::now();
+            structural = false;
+            match self.patch_all(mem.as_ref(), &stores) {
+                Ok(array) => {
+                    emit(Event::Log(tf("key_written", &[&self.group])));
+                    if stores.len() > 1 {
+                        emit(Event::Log(tf("many_key_stores_patched", &[&stores.len()])));
+                    }
+                    emit(Event::Ready);
+                    store = Some((array, by_structure));
+                }
+                Err(e) => emit(Event::Log(tf("key_write_retry", &[&e]))),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    const BASE: u64 = 0x10_0000;
+    /// A fake client heap: one region, byte `i` at `BASE + i`, two key stores at 0x100 and 0x800.
+    struct Heap(RefCell<Vec<u8>>);
+
+    impl Heap {
+        fn with_stores(keys: &[[u8; 32]]) -> Self {
+            let mut data = vec![0u8; 0x1000];
+            for offset in [0x100usize, 0x800] {
+                for e in 0..COUNT {
+                    let o = offset + e * ENTRY;
+                    data[o..o + 4].copy_from_slice(&(e as u32 + 1).to_le_bytes());
+                    data[o + 4..o + 36].copy_from_slice(&keys[e]);
+                    data[o + 36] = EXPECTED_FLAGS[e];
+                    data[o + 37] = 0x7f; // uninitialised padding byte: not checked
+                }
+            }
+            Self(RefCell::new(data))
+        }
+    }
+
+    impl Memory for Heap {
+        fn regions(&self) -> Vec<(u64, u64)> {
+            vec![(BASE, BASE + self.0.borrow().len() as u64)]
+        }
+
+        fn read(&self, addr: u64, len: usize) -> Option<Vec<u8>> {
+            let data = self.0.borrow();
+            let start = usize::try_from(addr.checked_sub(BASE)?).ok()?;
+            if start >= data.len() {
+                return None;
+            }
+            Some(data[start..(start + len).min(data.len())].to_vec())
+        }
+
+        fn write(&self, addr: u64, bytes: &[u8]) -> bool {
+            let mut data = self.0.borrow_mut();
+            let Ok(start) = usize::try_from(addr - BASE) else { return false };
+            let end = start + bytes.len();
+            if end > data.len() {
+                return false;
+            }
+            data[start..end].copy_from_slice(bytes);
+            true
+        }
+
+        fn alive(&self) -> bool {
+            true
+        }
+
+        fn pid(&self) -> u32 {
+            1
+        }
+    }
+
+    fn patcher(key_byte: &str) -> Patcher {
+        Patcher::new(&key_byte.repeat(32), 8).unwrap()
+    }
+
+    fn shipped_keys() -> Vec<[u8; 32]> {
+        KNOWN_KEYS.iter().map(|k| hex32(k).unwrap()).collect()
+    }
+
+    #[test]
+    fn patches_every_store_the_table_finds() {
+        let p = patcher("AB");
+        let heap = Heap::with_stores(&shipped_keys());
+        let (stores, by_structure) = p.scan(&heap, false);
+        assert_eq!(stores.len(), 2, "{stores:?}");
+        assert!(!by_structure);
+
+        let watched = p.patch_all(&heap, &stores).unwrap();
+        assert_eq!(watched, BASE + 0x100);
+
+        let (after, _) = p.scan(&heap, false);
+        assert_eq!(after.len(), 2, "{after:?}");
+        assert!(after.iter().all(|(_, state)| *state == State::Patched), "{after:?}");
+    }
+
+    #[test]
+    fn finds_a_new_table_by_structure_only() {
+        let p = patcher("CD");
+        let keys: Vec<[u8; 32]> = (0..COUNT).map(|e| [e as u8 + 1; 32]).collect();
+        let heap = Heap::with_stores(&keys);
+
+        let (shipped, _) = p.scan(&heap, false);
+        assert!(shipped.is_empty(), "the shipped table must not match: {shipped:?}");
+
+        let (stores, by_structure) = p.scan(&heap, true);
+        assert_eq!(stores.len(), 2, "{stores:?}");
+        assert!(by_structure);
+        assert!(stores.iter().all(|(_, state)| *state == State::Original), "{stores:?}");
+
+        p.patch_all(&heap, &stores).unwrap();
+        let (after, _) = p.scan(&heap, true);
+        assert!(after.iter().all(|(_, state)| *state == State::Patched), "{after:?}");
     }
 }

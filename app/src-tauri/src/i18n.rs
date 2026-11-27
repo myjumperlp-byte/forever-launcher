@@ -134,8 +134,8 @@ const MESSAGES: &[(&str, Texts)] = &[
     ("key_written", ["clé du serveur écrite (groupe {})", "server key written (group {})", "clave del servidor escrita (grupo {})", "chave do servidor gravada (grupo {})"]),
     ("key_write_retry", ["écriture de la clé : {}, nouvel essai", "writing the key: {}, retrying", "escribiendo la clave: {}, reintentando", "gravando a chave: {}, tentando de novo"]),
     ("waiting_realm", ["en attente de l'entrée dans le royaume…", "waiting for the realm login…", "esperando la entrada al reino…", "aguardando a entrada no reino…"]),
-    ("many_key_stores", ["{} magasins de clés à la fois : attente", "{} key stores at once: waiting", "{} almacenes de claves a la vez: esperando", "{} repositórios de chaves ao mesmo tempo: aguardando"]),
     ("key_store_missing", ["magasin de clés introuvable : cette version du client n'est peut-être pas encore prise en charge", "key store not found: this client build may not be supported yet", "repositorio de claves no encontrado: puede que esta versión del cliente aún no sea compatible", "repositório de chaves não encontrado: talvez esta versão do cliente ainda não seja suportada"]),
+    ("many_key_stores_patched", ["{} magasins de clés, tous corrigés", "{} key stores, all patched", "{} almacenes de claves, todos corregidos", "{} repositórios de chaves, todos corrigidos"]),
 ];
 
 #[cfg(test)]
